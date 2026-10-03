@@ -1,8 +1,9 @@
-// BioLang v1.0 - command-line runner.
+// BioLang v1.1 - command-line runner.
 //
-//   biolang <file.bio>      run a program
-//   biolang --tokens <f>    dump the token stream (debugging a lexer change)
-//   biolang --ast <f>       parse and report the tree shape without running
+//   biolang <file.bio>              run a program
+//   biolang --tokens <f>            dump the token stream (debugging a lexer change)
+//   biolang --ast <f>               parse and report the tree shape without running
+//   biolang --max-loop <n> <f>      raise the loop cap for long-running work
 //
 // Exit codes: 0 ok, 1 syntax error, 2 runtime error, 3 usage.
 //
@@ -17,53 +18,76 @@ internal static class Runner
 {
     private static int Main(string[] args)
     {
-        if (args.Length == 0)
+        string mode = "run";
+        int maxLoop = 1_000_000;
+        var rest = new List<string>();
+
+        for (int i = 0; i < args.Length; i++)
         {
-            Console.Error.WriteLine("  usage: biolang [--tokens|--ast] <file.bio>");
+            switch (args[i])
+            {
+                case "--tokens":
+                case "--ast":
+                    mode = args[i][2..];
+                    break;
+                case "--max-loop":
+                    if (i + 1 >= args.Length || !int.TryParse(args[++i], out maxLoop))
+                    {
+                        Console.Error.WriteLine("  --max-loop needs a number");
+                        return 3;
+                    }
+                    break;
+                default:
+                    rest.Add(args[i]);
+                    break;
+            }
+        }
+
+        if (rest.Count == 0)
+        {
+            Console.Error.WriteLine(
+                "  usage: biolang [--tokens|--ast] [--max-loop N] <file.bio>");
             return 3;
         }
 
-        string mode = "run";
-        string path = args[0];
-        if (args[0].StartsWith("--"))
-        {
-            mode = args[0][2..];
-            if (args.Length < 2) { Console.Error.WriteLine("  missing file"); return 3; }
-            path = args[1];
-        }
-
+        string path = rest[0];
         if (!File.Exists(path))
         {
             Console.Error.WriteLine($"  no such file: {path}");
             return 3;
         }
 
-        List<Token> tokens;
-        try
-        {
-            tokens = new Lexer(File.ReadAllText(path, Encoding.UTF8)).Tokenize();
-        }
-        catch (BioSyntaxError e)
-        {
-            Console.Error.WriteLine("  LEX ERROR: " + e.Message);
-            return 1;
-        }
-
+        // --tokens inspects one file in isolation; graft resolution would hide
+        // the tokens that belong to the file actually named on the command line.
         if (mode == "tokens")
         {
-            foreach (var t in tokens) Console.WriteLine("  " + t);
-            return 0;
+            try
+            {
+                var toks = new Lexer(File.ReadAllText(path, Encoding.UTF8)).Tokenize();
+                foreach (var t in toks) Console.WriteLine("  " + t);
+                return 0;
+            }
+            catch (BioSyntaxError e)
+            {
+                Console.Error.WriteLine("  LEX ERROR: " + e.Message);
+                return 1;
+            }
         }
 
         Program program;
         try
         {
-            program = new Parser(tokens).ParseProgram();
+            program = Loader.Load(path);        // resolves graft before execution
         }
         catch (BioSyntaxError e)
         {
             Console.Error.WriteLine("  SYNTAX ERROR: " + e.Message);
             return 1;
+        }
+        catch (BioRuntimeError e)
+        {
+            Console.Error.WriteLine("  LOAD ERROR: " + e.Message);
+            return 2;
         }
 
         if (mode == "ast")
@@ -71,12 +95,17 @@ internal static class Runner
             Console.WriteLine($"  organism : {program.Name}");
             Console.WriteLine($"  organs   : {string.Join(", ", program.Functions.Select(f => f.Name))}");
             Console.WriteLine($"  nucleus  : {(program.Main is null ? "absent" : "present")}");
+            Console.WriteLine($"  top-level: {program.TopLevel.Count} statement(s)");
             return 0;
         }
 
         try
         {
-            new Interpreter(program, Console.Out).Run();
+            var interp = new Interpreter(program, Console.Out, Console.In)
+            {
+                MaxLoopIterations = maxLoop,
+            };
+            interp.Run();
             return 0;
         }
         catch (BioRuntimeError e)

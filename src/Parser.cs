@@ -53,10 +53,17 @@ public sealed record PrintStmt(Expr Value, Token Tok) : Stmt;
 public sealed record ReturnStmt(Expr Value, Token Tok) : Stmt;
 public sealed record ExprStmt(Expr Value) : Stmt;
 
+// v1.1 additions
+public sealed record BreakStmt(Token Tok) : Stmt;
+public sealed record ContinueStmt(Token Tok) : Stmt;
+public sealed record ForStmt(Stmt? Init, Expr? Cond, Stmt? Step, Block Body, Token Tok) : Stmt;
+public sealed record GraftStmt(string Path, Token Tok) : Stmt;
+
 public sealed record FunctionDecl(BioType ReturnType, string Name, List<Param> Params,
                                   Block Body, Token Tok) : Node;
 public sealed record MainDecl(Block Body, Token Tok) : Node;
-public sealed record Program(string Name, List<FunctionDecl> Functions, MainDecl? Main, Token Tok) : Node;
+public sealed record Program(string Name, List<FunctionDecl> Functions, MainDecl? Main,
+                                 List<Stmt> TopLevel, Token Tok) : Node;
 
 // -------------------------------------------------------------------- parser
 public sealed class Parser
@@ -92,6 +99,7 @@ public sealed class Parser
 
         var fns = new List<FunctionDecl>();
         MainDecl? main = null;
+        var top = new List<Stmt>();
 
         while (!At(TokKind.RBrace) && !At(TokKind.EOF))
         {
@@ -104,13 +112,15 @@ public sealed class Parser
                 main = ParseMain();
             }
             else
-                // top-level statements are legal per the spec's Program rule
-                ParseStatement_Into(null, out _);
+                // Top-level statements are collected, not discarded. Dropping them
+                // silently was the old behaviour: a statement written outside any
+                // block simply did nothing, with no error to explain why.
+                top.Add(ParseStatement());
         }
 
         Expect(TokKind.RBrace, "'}'");
         Expect(TokKind.EOF, "end of file");
-        return new Program(name, fns, main, tok);
+        return new Program(name, fns, main, top, tok);
     }
 
     private FunctionDecl ParseFunction()
@@ -164,17 +174,9 @@ public sealed class Parser
         Expect(TokKind.LBrace, "'{'");
         var body = new List<Stmt>();
         while (!At(TokKind.RBrace) && !At(TokKind.EOF))
-            ParseStatement_Into(body, out _);
+            body.Add(ParseStatement());
         Expect(TokKind.RBrace, "'}'");
         return new Block(body);
-    }
-
-    // Parses one statement. `sink` collects it when non-null; the out parameter
-    // is how callers that need the node (none today) would get it.
-    private void ParseStatement_Into(List<Stmt>? sink, out Stmt? node)
-    {
-        node = ParseStatement();
-        sink?.Add(node);
     }
 
     private Stmt ParseStatement()
@@ -190,6 +192,31 @@ public sealed class Parser
 
             case TokKind.Replicate:
                 return ParseWhile();
+
+            case TokKind.Traverse:
+                return ParseFor();
+
+            case TokKind.Sever:
+            {
+                var tok = Expect(TokKind.Sever, "'sever'");
+                Match(TokKind.Semicolon);
+                return new BreakStmt(tok);
+            }
+
+            case TokKind.Skip:
+            {
+                var tok = Expect(TokKind.Skip, "'skip'");
+                Match(TokKind.Semicolon);
+                return new ContinueStmt(tok);
+            }
+
+            case TokKind.Graft:
+            {
+                var tok = Expect(TokKind.Graft, "'graft'");
+                var path = Expect(TokKind.String, "a file path in quotes");
+                Match(TokKind.Semicolon);
+                return new GraftStmt(path.Text, tok);
+            }
 
             case TokKind.Secrete:
             {
@@ -271,9 +298,79 @@ public sealed class Parser
         var cond = ParseExpr();
         Expect(TokKind.RParen, "')'");
         var then = ParseBlock();
+
         Block? els = null;
-        if (Match(TokKind.Adapt)) els = ParseBlock();
+        if (Match(TokKind.Adapt))
+        {
+            // `adapt mutate (...)` is the else-if chain. The nested IfStmt is
+            // wrapped in a one-statement block so IfStmt.Else stays a Block and
+            // nothing downstream has to know about a second shape.
+            els = At(TokKind.Mutate)
+                ? new Block(new List<Stmt> { ParseIf() })
+                : ParseBlock();
+        }
         return new IfStmt(cond, then, els);
+    }
+
+    // traverse (cell dna i = 0; i < 10; i = i + 1) { ... }
+    // A counted for-loop. The three clauses are optional, so `traverse (;;)` is
+    // legal and behaves like replicate(active) - the cap still applies.
+    private Stmt ParseFor()
+    {
+        var tok = Expect(TokKind.Traverse, "'traverse'");
+        Expect(TokKind.LParen, "'('");
+
+        Stmt? init = null;
+        if (!At(TokKind.Semicolon)) init = ParseSimpleStatement();
+        Expect(TokKind.Semicolon, "';' after the loop initialiser");
+
+        Expr? cond = null;
+        if (!At(TokKind.Semicolon)) cond = ParseExpr();
+        Expect(TokKind.Semicolon, "';' after the loop condition");
+
+        Stmt? step = null;
+        if (!At(TokKind.RParen)) step = ParseSimpleStatement();
+        Expect(TokKind.RParen, "')' after the loop step");
+
+        var body = ParseBlock();
+        return new ForStmt(init, cond, step, body, tok);
+    }
+
+    // Only a declaration or an assignment - what a for-loop header may contain.
+    // Parsed inline rather than through ParseVarDecl, because that variant
+    // consumes a trailing ';' as a statement terminator and would eat the
+    // separator the loop header still needs.
+    private Stmt ParseSimpleStatement()
+    {
+        if (At(TokKind.Cell) || At(TokKind.Fossil))
+        {
+            var tok = _t[_p++];
+            bool mutable = tok.Kind == TokKind.Cell;
+            var type = ParseType();
+            var nameTok = Expect(TokKind.Identifier, "variable name");
+            Expect(TokKind.Assign, "'='");
+            return new VarDecl(mutable, type, nameTok.Text, ParseExpr(), tok);
+        }
+
+        if (At(TokKind.Identifier) && Peek().Kind == TokKind.Assign)
+        {
+            var nameTok = _t[_p++];
+            Expect(TokKind.Assign, "'='");
+            return new Assign(nameTok.Text, ParseExpr(), nameTok);
+        }
+
+        if (IsTypeToken(Cur.Kind) && Peek().Kind == TokKind.Identifier
+            && Peek(2).Kind == TokKind.Assign)
+        {
+            var tok = Cur;
+            var type = ParseType();
+            var nameTok = Expect(TokKind.Identifier, "variable name");
+            Expect(TokKind.Assign, "'='");
+            return new VarDecl(true, type, nameTok.Text, ParseExpr(), tok);
+        }
+
+        throw new BioSyntaxError(
+            $"expected a declaration or an assignment here, found '{Cur.Text}'", Cur);
     }
 
     private Stmt ParseWhile()
@@ -432,6 +529,28 @@ public sealed class Parser
                     return new Call(tok.Text, args, tok);
                 }
                 return new Ident(tok.Text, tok);
+            }
+
+            // Builtins spelled with reserved words. `absorb`, `rna` and `dna`
+            // lex as keywords rather than identifiers, so the expression parser
+            // has to accept them explicitly or they are unusable as calls.
+            case TokKind.Absorb:
+            case TokKind.Rna:
+            case TokKind.Dna:
+            {
+                if (Peek().Kind != TokKind.LParen)
+                    throw new BioSyntaxError(
+                        $"'{tok.Text}' is a type or builtin, not a value; did you mean {tok.Text}(...)?",
+                        tok);
+                _p++;                        // the keyword
+                Expect(TokKind.LParen, "'('");
+                var args = new List<Expr>();
+                if (!At(TokKind.RParen))
+                {
+                    do { args.Add(ParseExpr()); } while (Match(TokKind.Comma));
+                }
+                Expect(TokKind.RParen, "')'");
+                return new Call(tok.Text, args, tok);
             }
 
             default:

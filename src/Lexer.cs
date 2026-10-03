@@ -14,6 +14,10 @@ public enum TokKind
     Organism, Nucleus, Organ, Cell, Fossil,
     // control
     Mutate, Adapt, Replicate, Return,
+    // added in v1.1: loop control and iteration
+    Traverse, Sever, Skip,
+    // added in v1.1: compound types and modules
+    Membrane, Graft,
     // io
     Secrete, Absorb,
     // types + literals
@@ -54,6 +58,13 @@ public sealed class Lexer
         ["mutate"]    = TokKind.Mutate,
         ["adapt"]     = TokKind.Adapt,
         ["replicate"] = TokKind.Replicate,
+        // v1.1: traverse is the counted for-loop; sever is break; skip is continue
+        ["traverse"]  = TokKind.Traverse,
+        ["sever"]     = TokKind.Sever,
+        ["skip"]      = TokKind.Skip,
+        // v1.1: a membrane is a struct; graft pulls in another organism
+        ["membrane"]  = TokKind.Membrane,
+        ["graft"]     = TokKind.Graft,
         ["secrete"]   = TokKind.Secrete,
         ["absorb"]    = TokKind.Absorb,
         ["active"]    = TokKind.Active,

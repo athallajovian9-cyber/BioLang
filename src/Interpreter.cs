@@ -47,19 +47,19 @@ public sealed class Interpreter
     private readonly Program _program;
     private readonly Dictionary<string, FunctionDecl> _fns = new(StringComparer.Ordinal);
     private readonly List<Dictionary<string, Cell>> _scopes = new();
-    private readonly TextWriter _out;
-    private const int MaxLoopIterations = 1_000_000;
-
+        private readonly TextWriter _out;
+        private readonly TextReader _in;
     // `Mutable` records how the cell was declared, so mutation can be refused.
     private sealed record Cell(Value Val, bool Mutable, Token Tok)
     {
         public Cell With(Value v) => new(v, Mutable, Tok);
     }
 
-    public Interpreter(Program program, TextWriter? output = null)
+    public Interpreter(Program program, TextWriter? output = null, TextReader? input = null)
     {
         _program = program;
         _out = output ?? Console.Out;
+        _in = input ?? Console.In;
         foreach (var f in program.Functions)
         {
             if (!_fns.TryAdd(f.Name, f))
@@ -68,14 +68,30 @@ public sealed class Interpreter
     }
 
     public void Run()
-    {
-        if (_program.Main is null)
-            throw new BioRuntimeError("no nucleus() found - an organism needs an entry point",
-                                      _program.Tok);
-        PushScope();
-        ExecBlock(_program.Main.Body);
-        PopScope();
-    }
+        {
+            if (_program.Main is null)
+                throw new BioRuntimeError("no nucleus() found - an organism needs an entry point",
+                                          _program.Tok);
+            // One shared global scope: a cell declared at the top level of the
+            // organism is visible inside nucleus(), which is the least surprising
+            // reading of "top-level".
+            PushScope();
+            try
+            {
+                foreach (var s in _program.TopLevel)
+                    if (Exec(s) is ReturnSignal r) throw r;
+                ExecBlock(_program.Main.Body);
+            }
+            catch (BreakSignal)
+            {
+                throw new BioRuntimeError("sever is only valid inside a loop", _program.Tok);
+            }
+            catch (ContinueSignal)
+            {
+                throw new BioRuntimeError("skip is only valid inside a loop", _program.Tok);
+            }
+            PopScope();
+        }
 
     // ------------------------------------------------------------------ scopes
     private void PushScope() => _scopes.Add(new Dictionary<string, Cell>(StringComparer.Ordinal));
@@ -106,10 +122,20 @@ public sealed class Interpreter
     }
 
     private sealed class ReturnSignal : Exception
-    {
-        public Value Value { get; }
-        public ReturnSignal(Value v) => Value = v;
-    }
+        {
+            public Value Value { get; }
+            public ReturnSignal(Value v) => Value = v;
+        }
+
+        // sever / skip. Carried as exceptions because a break can be several nested
+        // blocks deep; unwinding is what the runtime already does for `return`.
+        // Unlike return they are caught by the nearest loop, not by the function.
+        private sealed class BreakSignal : Exception { }
+        private sealed class ContinueSignal : Exception { }
+
+        // v1.1: the loop cap is now a field, so it can be raised from the CLI for
+        // long-running work instead of being a hardcoded wall.
+        public int MaxLoopIterations { get; set; } = 1_000_000;
 
     private ReturnSignal? Exec(Stmt s)
     {
@@ -168,20 +194,64 @@ public sealed class Interpreter
             }
 
             case WhileStmt w:
-            {
-                int guard = 0;
-                while (Eval(w.Cond).Truthy)
-                {
-                    // A runaway loop must fail loudly, not hang the machine.
-                    if (++guard > MaxLoopIterations)
-                        throw new BioRuntimeError(
-                            $"replicate ran {MaxLoopIterations} iterations without ending", w.Tok);
-                    PushScope();
-                    try { ExecBlock(w.Body); } catch (ReturnSignal) { PopScope(); throw; }
-                    PopScope();
-                }
-                return null;
-            }
+                        {
+                            int guard = 0;
+                            while (Eval(w.Cond).Truthy)
+                            {
+                                if (++guard > MaxLoopIterations)
+                                    throw new BioRuntimeError(
+                                        $"replicate ran {MaxLoopIterations} iterations without ending", w.Tok);
+                                // The loop owns this scope, so break/continue can unwind to
+                                // exactly here without leaking the scope.
+                                PushScope();
+                                try { ExecBlock(w.Body); }
+                                catch (BreakSignal) { PopScope(); break; }
+                                catch (ContinueSignal) { PopScope(); continue; }
+                                catch (ReturnSignal) { PopScope(); throw; }
+                                PopScope();
+                            }
+                            return null;
+                        }
+
+                        // traverse: initialise, test, body, step. `sever` skips the step,
+                        // matching the usual for-loop contract.
+                        case ForStmt f:
+                        {
+                            PushScope();
+                            try
+                            {
+                                if (f.Init is not null) Exec(f.Init);
+                                int guard = 0;
+                                while (f.Cond is null || Eval(f.Cond).Truthy)
+                                {
+                                    if (++guard > MaxLoopIterations)
+                                        throw new BioRuntimeError(
+                                            $"traverse ran {MaxLoopIterations} iterations without ending", f.Tok);
+                                    PushScope();
+                                    try { ExecBlock(f.Body); }
+                                    catch (ContinueSignal) { /* fall through to the step */ }
+                                    catch (BreakSignal) { PopScope(); break; }
+                                    finally { PopScope(); }
+                                    if (f.Step is not null) Exec(f.Step);
+                                }
+                            }
+                            catch (ReturnSignal) { PopScope(); throw; }
+                            PopScope();
+                            return null;
+                        }
+
+                        case BreakStmt:
+                            throw new BreakSignal();
+
+                        case ContinueStmt:
+                                        throw new ContinueSignal();
+
+                                    case GraftStmt g:
+                                        // graft is resolved by the Loader before execution ever starts.
+                                        // Reaching here means the loader missed one, which is a bug in
+                                        // the loader rather than in the BioLang program.
+                                        throw new BioRuntimeError(
+                                            $"internal: graft '{g.Path}' was not resolved before execution", g.Tok);
 
             default:
                 throw new BioRuntimeError("unhandled statement " + s.GetType().Name);
@@ -298,9 +368,15 @@ public sealed class Interpreter
     }
 
     private Value CallFunction(Call c)
-    {
-        if (!_fns.TryGetValue(c.Name, out var fn))
-            throw new BioRuntimeError($"no organ named '{c.Name}'", c.Tok);
+        {
+            // Builtins the runtime provides rather than the program. Checked before
+            // user organs so a program cannot accidentally shadow them into
+            // something with different arity.
+            if (c.Name == "absorb") return BuiltinAbsorb(c);
+            if (c.Name == "rna" || c.Name == "dna") return BuiltinConvert(c);
+
+            if (!_fns.TryGetValue(c.Name, out var fn))
+                throw new BioRuntimeError($"no organ named '{c.Name}'", c.Tok);
 
         if (c.Args.Count != fn.Params.Count)
             throw new BioRuntimeError(
@@ -325,10 +401,20 @@ public sealed class Interpreter
                 $"organ '{fn.Name}' finished without returning a {Name(fn.ReturnType)}", fn.Tok);
         }
         catch (ReturnSignal r)
-        {
-            result = r.Value;
-        }
-        finally
+                {
+                    result = r.Value;
+                }
+                catch (BreakSignal)
+                {
+                    throw new BioRuntimeError(
+                        $"sever is only valid inside a loop, and this one is inside organ '{fn.Name}'", fn.Tok);
+                }
+                catch (ContinueSignal)
+                {
+                    throw new BioRuntimeError(
+                        $"skip is only valid inside a loop, and this one is inside organ '{fn.Name}'", fn.Tok);
+                }
+                finally
         {
             PopScope();
         }
@@ -339,31 +425,222 @@ public sealed class Interpreter
     }
 
     private Value CallMethod(MethodCall mc)
-    {
-        var target = Eval(mc.Target);
-        if (target.Type != BioType.Colony)
-            throw new BioRuntimeError($"'.{mc.Name}' is only defined on colony", mc.Tok);
-
-        var list = (List<Value>)target.Raw;
-
-        switch (mc.Name)
         {
-            case "inject":
+            var target = Eval(mc.Target);
+            if (target.Type != BioType.Colony)
+                throw new BioRuntimeError($"'.{mc.Name}' is only defined on colony", mc.Tok);
+
+            var list = (List<Value>)target.Raw;
+
+            // Mutating methods record the intent explicitly: these change the array in
+                        // place, so a fossil must be refused for all of them, not just inject.
+                        if (mc.Name is "inject" or "insert" or "remove" or "reverse" or "sort" or "clear")
+                            EnsureTargetMutable(mc);
+
+            switch (mc.Name)
             {
-                if (mc.Args.Count != 1)
-                    throw new BioRuntimeError("inject() takes exactly one argument", mc.Tok);
-                EnsureTargetMutable(mc);
-                list.Add(Eval(mc.Args[0]));
-                return Value.Void();
+                case "inject":
+                {
+                    Require(mc, 1);
+                    list.Add(Eval(mc.Args[0]));
+                    return Value.Void();
+                }
+                case "length":
+                    Require(mc, 0);
+                    return new Value(BioType.Dna, (double)list.Count);
+
+                case "insert":
+                {
+                    Require(mc, 2);
+                    int at = IndexOf(Eval(mc.Args[0]), list.Count, mc.Tok, allowEnd: true);
+                    list.Insert(at, Eval(mc.Args[1]));
+                    return Value.Void();
+                }
+                case "remove":
+                {
+                    Require(mc, 1);
+                    int at = IndexOf(Eval(mc.Args[0]), list.Count, mc.Tok);
+                    var removed = list[at];
+                    list.RemoveAt(at);
+                    return removed;
+                }
+                case "clear":
+                    Require(mc, 0);
+                    list.Clear();
+                    return Value.Void();
+
+                case "contains":
+                {
+                    Require(mc, 1);
+                    var needle = Eval(mc.Args[0]);
+                    return new Value(BioType.Enzyme, list.Any(v => Equals(v, needle)));
+                }
+                case "indexOf":
+                {
+                    Require(mc, 1);
+                    var needle = Eval(mc.Args[0]);
+                    int found = list.FindIndex(v => Equals(v, needle));
+                    return new Value(BioType.Dna, (double)found);   // -1 when absent
+                }
+
+                case "reverse":
+                    Require(mc, 0);
+                    list.Reverse();
+                    return Value.Void();
+
+                case "sort":
+                {
+                    // Numbers only, and descending is opt-in. Sorting mixed types is
+                    // refused rather than given an arbitrary order.
+                    Require(mc, 0, 1);
+                    bool desc = mc.Args.Count == 1 && Eval(mc.Args[0]).Truthy;
+                    foreach (var v in list)
+                        if (v.Type != BioType.Dna)
+                            throw new BioRuntimeError(
+                                $"sort() needs a colony of dna; found {Name(v.Type)}", mc.Tok);
+                    var nums = list.Select(v => (double)v.Raw).ToList();
+                    nums.Sort();
+                    if (desc) nums.Reverse();
+                    list.Clear();
+                    foreach (var n in nums) list.Add(new Value(BioType.Dna, n));
+                    return Value.Void();
+                }
+
+                case "sum":
+                {
+                    Require(mc, 0);
+                    double total = 0;
+                    foreach (var v in list)
+                    {
+                        if (v.Type != BioType.Dna)
+                            throw new BioRuntimeError(
+                                $"sum() needs a colony of dna; found {Name(v.Type)}", mc.Tok);
+                        total += (double)v.Raw;
+                    }
+                    return new Value(BioType.Dna, total);
+                }
+                case "min":
+                case "max":
+                {
+                    Require(mc, 0);
+                    if (list.Count == 0)
+                        throw new BioRuntimeError($"{mc.Name}() on an empty colony", mc.Tok);
+                    foreach (var v in list)
+                        if (v.Type != BioType.Dna)
+                            throw new BioRuntimeError(
+                                $"{mc.Name}() needs a colony of dna; found {Name(v.Type)}", mc.Tok);
+                    var ns = list.Select(v => (double)v.Raw);
+                    return new Value(BioType.Dna, mc.Name == "min" ? ns.Min() : ns.Max());
+                }
+
+                case "first":
+                    Require(mc, 0);
+                    if (list.Count == 0) throw new BioRuntimeError("first() on an empty colony", mc.Tok);
+                    return list[0];
+                case "last":
+                    Require(mc, 0);
+                    if (list.Count == 0) throw new BioRuntimeError("last() on an empty colony", mc.Tok);
+                    return list[^1];
+
+                case "slice":
+                {
+                    // [a, b) - end-exclusive, and negatives count from the end.
+                    Require(mc, 1, 2);
+                    int a = IndexOf(Eval(mc.Args[0]), list.Count, mc.Tok, allowEnd: true);
+                    int b = mc.Args.Count == 2
+                        ? IndexOf(Eval(mc.Args[1]), list.Count, mc.Tok, allowEnd: true)
+                        : list.Count;
+                    if (b < a) throw new BioRuntimeError(
+                        $"slice({a}, {b}) ends before it starts", mc.Tok);
+                    return new Value(BioType.Colony, list.GetRange(a, b - a));
+                }
+                case "copy":
+                    Require(mc, 0);
+                    return new Value(BioType.Colony, new List<Value>(list));
+
+                case "join":
+                {
+                    Require(mc, 0, 1);
+                    string sep = mc.Args.Count == 1 ? Display(Eval(mc.Args[0])) : "";
+                    return new Value(BioType.Rna, string.Join(sep, list.Select(Display)));
+                }
+
+                default:
+                    throw new BioRuntimeError(
+                        $"colony has no method '{mc.Name}'. Available: inject, length, insert, " +
+                        "remove, clear, contains, indexOf, reverse, sort, sum, min, max, " +
+                        "first, last, slice, copy, join", mc.Tok);
             }
-            case "length":
-                if (mc.Args.Count != 0)
-                    throw new BioRuntimeError("length() takes no arguments", mc.Tok);
-                return new Value(BioType.Dna, (double)list.Count);
-            default:
-                throw new BioRuntimeError($"colony has no method '{mc.Name}'", mc.Tok);
         }
-    }
+
+        private void Require(MethodCall mc, params int[] allowed)
+        {
+            if (!allowed.Contains(mc.Args.Count))
+                throw new BioRuntimeError(
+                    $"{mc.Name}() takes " + (allowed.Length == 1
+                        ? $"{allowed[0]} argument(s)"
+                        : string.Join(" or ", allowed) + " arguments")
+                    + $", got {mc.Args.Count}", mc.Tok);
+        }
+
+        // Shared index resolution: negatives count from the end, and `allowEnd`
+        // permits exactly list.Count (a valid insert/slice position, not a valid read).
+        private int IndexOf(Value key, int count, Token tok, bool allowEnd = false)
+        {
+            if (key.Type != BioType.Dna)
+                throw new BioRuntimeError("an index must be dna", tok);
+            int i = (int)(double)key.Raw;
+            if (i < 0) i += count;
+            int upper = allowEnd ? count : count - 1;
+            if (i < 0 || i > upper)
+                throw new BioRuntimeError(
+                    $"index {i} is outside the colony (size {count})", tok);
+            return i;
+        }
+
+        // absorb() reads one line from the input stream.
+        // absorb("prompt") prints the prompt first, without a newline.
+        private Value BuiltinAbsorb(Call c)
+        {
+            if (c.Args.Count > 1)
+                throw new BioRuntimeError($"absorb() takes 0 or 1 argument(s), got {c.Args.Count}", c.Tok);
+            if (c.Args.Count == 1)
+            {
+                _out.Write(Display(Eval(c.Args[0])));
+                _out.Flush();
+            }
+            string? line = _in.ReadLine();
+            // End of input is not an error, but it must be distinguishable from an
+            // empty line - returning "" silently would hide a broken pipe.
+            if (line is null)
+                throw new BioRuntimeError(
+                    "absorb() reached the end of input", c.Tok);
+            return new Value(BioType.Rna, line);
+        }
+
+        // rna(x) and dna(x) convert between text and number explicitly.
+        private Value BuiltinConvert(Call c)
+        {
+            if (c.Args.Count != 1)
+                throw new BioRuntimeError($"{c.Name}() takes exactly one argument", c.Tok);
+            var v = Eval(c.Args[0]);
+
+            if (c.Name == "rna")
+                return new Value(BioType.Rna, Display(v));
+
+            // dna(...)
+            if (v.Type == BioType.Dna) return v;
+            if (v.Type == BioType.Enzyme) return new Value(BioType.Dna, (bool)v.Raw ? 1.0 : 0.0);
+            if (v.Type == BioType.Rna)
+            {
+                if (double.TryParse((string)v.Raw, System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture, out double d))
+                    return new Value(BioType.Dna, d);
+                throw new BioRuntimeError(
+                    $"dna(\"{v.Raw}\") is not a number", c.Tok);
+            }
+            throw new BioRuntimeError($"cannot convert {Name(v.Type)} to dna", c.Tok);
+        }
 
     // inject() mutates the array in place. If the array came from a fossil, that
     // is a fossil being modified - refuse it, or the keyword means nothing.
