@@ -142,7 +142,7 @@
     <div class="meta">
       <span class="on">v1.0.0</span>
       <span>C# / .NET 10</span>
-      <span>79 tests</span>
+      <span>117 tests</span>
       <span>MIT</span>
       <span>tree-walking interpreter</span>
     </div>
@@ -203,6 +203,10 @@
       <div><b>rna</b><em>string.</em></div>
       <div><b>dna</b><em>number.</em></div>
       <div><b>enzyme</b><em>boolean.</em></div>
+      <div><b>membrane</b><em>a struct: fields + methods</em></div>
+      <div><b>trait</b><em>a promise about behaviour</em></div>
+      <div><b>witnesses</b><em>a membrane keeping it</em></div>
+      <div><b>spore</b><em>an anonymous function</em></div>
       <div><b>colony</b><em>array. 17 methods</em></div>
     </div>
   </div>
@@ -222,6 +226,9 @@
           <li><code>fossil</code> refuses reassign <i>and</i> mutation</li>
           <li>Negative indexing: <code>-1</code> is the last element</li>
           <li>Modules via <code>graft</code>, with cycle detection</li>
+          <li>Structs (<code>membrane</code>) with methods and field mutation</li>
+          <li>Traits: one organ accepts any membrane that witnesses it</li>
+          <li>Closures: organs are values, <code>spore</code> is a lambda</li>
           <li>Input via <code>absorb</code>; 17 array methods</li>
           <li>Errors carry line and column</li>
         </ul>
@@ -230,8 +237,8 @@
         <h3>Not there yet</h3>
         <ul class="no">
           <li>It is an interpreter, not a compiler — no bytecode, no JIT, no optimiser</li>
-          <li>No structs. <code>membrane</code> is reserved but unimplemented</li>
-          <li>No closures or lambdas — organs are top-level only</li>
+          <li>No generics — traits cover the polymorphism that was missing</li>
+          <li>Traits cannot require other traits</li>
           <li>No generics, no user-defined operators, no namespaces</li>
           <li>One <code>nucleus</code> per organism; grafted files may not declare their own</li>
           <li>Loops are capped at 1,000,000 iterations — raise with <code>--max-loop N</code></li>
@@ -288,7 +295,7 @@ biolang --tokens file.bio   <span class="c"># dump the token stream</span>
 biolang --ast    file.bio   <span class="c"># parse, report the tree, do not run</span>
 
 <span class="c"># the test suite</span>
-cd .. &amp;&amp; bash run_tests.sh   <span class="c"># 79 checks</span></pre>
+cd .. &amp;&amp; bash run_tests.sh   <span class="c"># 117 checks</span></pre>
   </div>
 </section>
 

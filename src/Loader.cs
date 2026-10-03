@@ -49,6 +49,8 @@ public static class Loader
         Program parsed = new Parser(tokens).ParseProgram();
 
         var functions = new List<FunctionDecl>(parsed.Functions);
+        var membranes = new List<MembraneDecl>(parsed.Membranes);
+        var traits = new List<TraitDecl>(parsed.Traits);
         var top = new List<Stmt>();
         string dir = Path.GetDirectoryName(fullPath) ?? ".";
 
@@ -66,6 +68,8 @@ public static class Loader
                         "only the main organism may have one", g.Tok);
 
                 functions.AddRange(child.Functions);
+                membranes.AddRange(child.Membranes);
+                traits.AddRange(child.Traits);
                 top.AddRange(child.TopLevel);
             }
             else
@@ -75,6 +79,6 @@ public static class Loader
         }
 
         loading.Remove(fullPath);
-        return parsed with { Functions = functions, TopLevel = top };
+        return parsed with { Functions = functions, Membranes = membranes, Traits = traits, TopLevel = top };
     }
 }

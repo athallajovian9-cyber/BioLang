@@ -29,43 +29,158 @@ public sealed class BioRuntimeError : Exception
 
 // A returned value plus the type it claims. Keeping the tag beside the value is
 // what makes type checking possible without a separate symbol table pass.
-public sealed record Value(BioType Type, object Raw)
+//
+// TypeName is set only when Type is Membrane: a struct's type is its name, and
+// two different membranes must not be interchangeable.
+public sealed record Value(BioType Type, object Raw, string? TypeName = null)
 {
     public static Value Void() => new(BioType.Void, 0.0);
-    public bool Truthy => Type switch
+
+        // How the type reads in a message. Inlined rather than calling Interpreter's
+        // helper: this record sits outside that class and cannot reach it.
+        public string TypeLabel => Type switch
+        {
+            BioType.Membrane => TypeName ?? "membrane",
+            BioType.Rna => "rna",
+            BioType.Dna => "dna",
+            BioType.Enzyme => "enzyme",
+            BioType.Colony => "colony",
+                        BioType.Organ => "organ",
+                        _ => "void",
+                    };
+
+                public bool Truthy => Type switch
     {
         BioType.Enzyme => (bool)Raw,
         BioType.Dna => (double)Raw != 0,
         BioType.Rna => ((string)Raw).Length > 0,
         BioType.Colony => ((List<Value>)Raw).Count > 0,
+        BioType.Membrane => true,
         _ => false,
     };
+}
+
+// A membrane's instance. A reference type on purpose: `p.x = 5` must be visible
+// through every binding of p, which is what people expect from a record.
+public sealed class BioStruct
+{
+    public string TypeName { get; }
+    public Dictionary<string, Value> Fields { get; }
+
+    public BioStruct(string typeName, Dictionary<string, Value> fields)
+    {
+        TypeName = typeName;
+        Fields = fields;
+    }
+}
+
+// A variable binding. Top-level rather than nested inside Interpreter, because
+// BioClosure carries captured scopes and has to name the type.
+//
+// `Mutable` records how it was declared, so mutation can be refused.
+public sealed record Cell(Value Val, bool Mutable, Token Tok)
+{
+    public Cell With(Value v) => new(v, Mutable, Tok);
+}
+
+// A callable: a named organ or an anonymous spore, plus the scope it was
+// created in. Capturing the scope is what makes a closure a closure - without
+// it, a spore passed out of a function would lose the variables it closed over.
+public sealed class BioClosure
+{
+    public string Label { get; }
+    public List<Param> Params { get; }
+    public TypeRef ReturnType { get; }
+    public Block Body { get; }
+    public List<Dictionary<string, Cell>> Captured { get; }
+
+    public BioClosure(string label, List<Param> parameters, TypeRef returnType,
+                      Block body, List<Dictionary<string, Cell>> captured)
+    {
+        Label = label;
+        Params = parameters;
+        ReturnType = returnType;
+        Body = body;
+        Captured = captured;
+    }
 }
 
 public sealed class Interpreter
 {
     private readonly Program _program;
     private readonly Dictionary<string, FunctionDecl> _fns = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, MembraneDecl> _membranes = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, TraitDecl> _traits = new(StringComparer.Ordinal);
     private readonly List<Dictionary<string, Cell>> _scopes = new();
         private readonly TextWriter _out;
         private readonly TextReader _in;
     // `Mutable` records how the cell was declared, so mutation can be refused.
-    private sealed record Cell(Value Val, bool Mutable, Token Tok)
-    {
-        public Cell With(Value v) => new(v, Mutable, Tok);
-    }
-
-    public Interpreter(Program program, TextWriter? output = null, TextReader? input = null)
+        public Interpreter(Program program, TextWriter? output = null, TextReader? input = null)
     {
         _program = program;
         _out = output ?? Console.Out;
         _in = input ?? Console.In;
         foreach (var f in program.Functions)
-        {
-            if (!_fns.TryAdd(f.Name, f))
-                throw new BioRuntimeError($"organ '{f.Name}' is declared more than once", f.Tok);
-        }
-    }
+                {
+                    if (!_fns.TryAdd(f.Name, f))
+                        throw new BioRuntimeError($"organ '{f.Name}' is declared more than once", f.Tok);
+                }
+                foreach (var m in program.Membranes)
+                        {
+                            if (!_membranes.TryAdd(m.Name, m))
+                                throw new BioRuntimeError($"membrane '{m.Name}' is declared more than once", m.Tok);
+                        }
+                        foreach (var t in program.Traits)
+                        {
+                            if (!_traits.TryAdd(t.Name, t))
+                                throw new BioRuntimeError($"trait '{t.Name}' is declared more than once", t.Tok);
+                            // A trait sharing a name with a membrane makes every type position
+                            // ambiguous, so it is refused rather than resolved by precedence.
+                            if (_membranes.ContainsKey(t.Name))
+                                throw new BioRuntimeError(
+                                    $"'{t.Name}' is declared as both a trait and a membrane", t.Tok);
+                        }
+
+                        // Validate in a SECOND pass: a membrane may reference one declared later
+                        // in the file, and checking while registering would reject that.
+                        foreach (var m in program.Membranes)
+                        {
+                            foreach (var fld in m.Fields)
+                                if (fld.Type.Kind == BioType.Membrane && !_membranes.ContainsKey(fld.Type.Name!)
+                                    && !_traits.ContainsKey(fld.Type.Name!))
+                                    throw new BioRuntimeError(
+                                        $"membrane '{m.Name}' has field '{fld.Name}' of unknown type '{fld.Type}'",
+                                        fld.Tok);
+
+                            // Promising a trait means implementing every signature it declares,
+                            // with the same arity and the same types. Checked here so a missing
+                            // method is a load-time error, not a surprise on the one code path
+                            // that happens to call it.
+                            foreach (var (traitName, tok) in m.Traits)
+                            {
+                                if (!_traits.TryGetValue(traitName, out var tr))
+                                    throw new BioRuntimeError(
+                                        $"membrane '{m.Name}' witnesses unknown trait '{traitName}'", tok);
+
+                                foreach (var sig in tr.Signatures)
+                                {
+                                    var impl = m.Methods.FirstOrDefault(x => x.Name == sig.Name);
+                                    if (impl is null)
+                                        throw new BioRuntimeError(
+                                            $"membrane '{m.Name}' witnesses {traitName} but does not implement '{sig.Name}'",
+                                            tok);
+                                    if (impl.Params.Count != sig.Params.Count)
+                                        throw new BioRuntimeError(
+                                            $"{m.Name}.{sig.Name} takes {impl.Params.Count} argument(s) but {traitName} " +
+                                            $"declares {sig.Params.Count}", impl.Tok);
+                                    if (!impl.ReturnType.SameAs(sig.ReturnType))
+                                        throw new BioRuntimeError(
+                                            $"{m.Name}.{sig.Name} returns {impl.ReturnType} but {traitName} " +
+                                            $"declares {sig.ReturnType}", impl.Tok);
+                                }
+                            }
+                        }
+                    }
 
     public void Run()
         {
@@ -142,25 +257,47 @@ public sealed class Interpreter
         switch (s)
         {
             case VarDecl d:
-            {
-                var v = Eval(d.Init);
-                RequireType(v, d.Type, d.Tok, $"cannot store {Name(v.Type)} in {Name(d.Type)} '{d.Name}'");
-                Define(d.Name, new Cell(v, d.Mutable, d.Tok), d.Tok);
-                return null;
-            }
+                        {
+                            var v = Eval(d.Init);
+                            RequireType(v, d.Type, d.Tok,
+                                $"cannot store {v.TypeLabel} in {d.Type} '{d.Name}'");
+                            Define(d.Name, new Cell(v, d.Mutable, d.Tok), d.Tok);
+                            return null;
+                        }
 
-            case Assign a:
-            {
-                var cell = Lookup(a.Name, a.Tok);
-                if (!cell.Mutable)
-                    throw new BioRuntimeError(
-                        $"'{a.Name}' is a fossil and cannot be reassigned", a.Tok);
-                var v = Eval(a.Value);
-                RequireType(v, cell.Val.Type, a.Tok,
-                    $"cannot store {Name(v.Type)} in {Name(cell.Val.Type)} '{a.Name}'");
-                SetCell(a.Name, cell.With(v));
-                return null;
-            }
+                        case Assign a:
+                        {
+                            var cell = Lookup(a.Name, a.Tok);
+                            if (!cell.Mutable)
+                                throw new BioRuntimeError(
+                                    $"'{a.Name}' is a fossil and cannot be reassigned", a.Tok);
+                            var v = Eval(a.Value);
+                            RequireType(v, ToTypeRef(cell.Val), a.Tok,
+                                $"cannot store {v.TypeLabel} in {cell.Val.TypeLabel} '{a.Name}'");
+                            SetCell(a.Name, cell.With(v));
+                            return null;
+                        }
+
+                        // p.x = 5. Mutating a field mutates the instance, which every binding
+                        // of it sees - that is the point of a record.
+                        case FieldAssign fa:
+                        {
+                            var target = Eval(fa.Target);
+                            if (target.Type != BioType.Membrane)
+                                throw new BioRuntimeError(
+                                    $"'{fa.Field}' is only a field of a membrane, not of {target.TypeLabel}",
+                                    fa.Tok);
+                            var st = (BioStruct)target.Raw;
+                                            if (!st.Fields.TryGetValue(fa.Field, out var old))
+                                                throw new BioRuntimeError(
+                                                    $"membrane '{st.TypeName}' has no field '{fa.Field}'", fa.Tok);
+                                            var v = Eval(fa.Value);
+                                            var declared = _membranes[st.TypeName].Fields.First(f => f.Name == fa.Field);
+                                            RequireType(v, declared.Type, fa.Tok,
+                                                $"cannot store {v.TypeLabel} in {declared.Type} '{st.TypeName}.{fa.Field}'");
+                                            st.Fields[fa.Field] = v;
+                                            return null;
+                        }
 
             case PrintStmt p:
                 _out.WriteLine(Display(Eval(p.Value)));
@@ -275,10 +412,59 @@ public sealed class Interpreter
             case BoolLit b: return new Value(BioType.Enzyme, b.Value);
 
             case ArrayLit a:
-                return new Value(BioType.Colony, a.Items.Select(Eval).ToList());
+                            return new Value(BioType.Colony, a.Items.Select(Eval).ToList());
+
+                        // Point { x = 1, y = 2 }. Every declared field must be supplied:
+                        // a partially built record is a bug waiting to happen, not a feature.
+                        case StructLit sl:
+                        {
+                            if (!_membranes.TryGetValue(sl.Name, out var decl))
+                                throw new BioRuntimeError(
+                                    $"'{sl.Name}' is not a membrane. Declare it with: membrane {sl.Name} {{ ... }}",
+                                    sl.Tok);
+
+                            var given = new Dictionary<string, Value>(StringComparer.Ordinal);
+                            foreach (var (field, expr) in sl.Fields)
+                            {
+                                if (!given.TryAdd(field, Eval(expr)))
+                                    throw new BioRuntimeError(
+                                        $"field '{field}' is set twice in this {sl.Name}", sl.Tok);
+                            }
+
+                            var fields = new Dictionary<string, Value>(StringComparer.Ordinal);
+                            foreach (var f in decl.Fields)
+                            {
+                                if (!given.TryGetValue(f.Name, out var v))
+                                    throw new BioRuntimeError(
+                                        $"{sl.Name} is missing field '{f.Name}' ({f.Type})", sl.Tok);
+                                RequireType(v, f.Type, sl.Tok,
+                                    $"field '{f.Name}' of {sl.Name} is {f.Type}, got {v.TypeLabel}");
+                                fields[f.Name] = v;
+                            }
+
+                            var unknown = given.Keys.Where(k => !decl.Fields.Any(f => f.Name == k)).ToList();
+                            if (unknown.Count > 0)
+                                throw new BioRuntimeError(
+                                    $"membrane '{sl.Name}' has no field '{unknown[0]}'", sl.Tok);
+
+                            return new Value(BioType.Membrane, new BioStruct(sl.Name, fields), sl.Name);
+                        }
 
             case Ident i:
-                return Lookup(i.Name, i.Tok).Val;
+                            return EvalIdent(i);
+
+                        case LambdaLit lam:
+                            return new Value(BioType.Organ,
+                                new BioClosure("spore", lam.Params, lam.ReturnType, lam.Body, SnapshotScopes()));
+
+                        case Invoke inv:
+                        {
+                            var callee = Eval(inv.Callee);
+                            if (callee.Type != BioType.Organ)
+                                throw new BioRuntimeError(
+                                    $"this expression is {callee.TypeLabel}, not something callable", inv.Tok);
+                            return CallClosure((BioClosure)callee.Raw, inv.Args, inv.Tok);
+                        }
 
             case Unary u:
             {
@@ -297,14 +483,24 @@ public sealed class Interpreter
             case Call c: return CallFunction(c);
 
             case Member m:
-            {
-                var t = Eval(m.Target);
-                if (t.Type != BioType.Colony)
-                    throw new BioRuntimeError($"'.{m.Name}' is only defined on colony", m.Tok);
-                if (m.Name == "length")
-                    return new Value(BioType.Dna, (double)((List<Value>)t.Raw).Count);
-                throw new BioRuntimeError($"colony has no member '{m.Name}'", m.Tok);
-            }
+                        {
+                            var t = Eval(m.Target);
+
+                            if (t.Type == BioType.Membrane)
+                            {
+                                var s = (BioStruct)t.Raw;
+                                if (s.Fields.TryGetValue(m.Name, out var fv)) return fv;
+                                throw new BioRuntimeError(
+                                    $"membrane '{s.TypeName}' has no field '{m.Name}'", m.Tok);
+                            }
+
+                            if (t.Type != BioType.Colony)
+                                throw new BioRuntimeError(
+                                    $"'.{m.Name}' is not defined on {t.TypeLabel}", m.Tok);
+                            if (m.Name == "length")
+                                return new Value(BioType.Dna, (double)((List<Value>)t.Raw).Count);
+                            throw new BioRuntimeError($"colony has no member '{m.Name}'", m.Tok);
+                        }
 
             case MethodCall mc: return CallMethod(mc);
 
@@ -375,60 +571,157 @@ public sealed class Interpreter
             if (c.Name == "absorb") return BuiltinAbsorb(c);
             if (c.Name == "rna" || c.Name == "dna") return BuiltinConvert(c);
 
+            // A variable holding an organ shadows a declaration of the same name.
+                    // Without this, higher-order functions are unusable - passing a function
+                    // in and calling it would always reach the top-level one instead.
+                    if (TryLookup(c.Name, out var cell))
+                    {
+                        if (cell.Val.Type == BioType.Organ)
+                            return CallClosure((BioClosure)cell.Val.Raw, c.Args, c.Tok);
+
+                        // The name exists but holds something you cannot call. Saying only
+                        // "no organ named x" sends the reader looking for a missing function
+                        // when the real problem is the value they are holding.
+                        throw new BioRuntimeError(
+                            $"'{c.Name}' is {cell.Val.TypeLabel}, not something callable", c.Tok);
+                    }
+
             if (!_fns.TryGetValue(c.Name, out var fn))
-                throw new BioRuntimeError($"no organ named '{c.Name}'", c.Tok);
+                throw new BioRuntimeError(
+                    $"no organ named '{c.Name}'", c.Tok);
 
-        if (c.Args.Count != fn.Params.Count)
-            throw new BioRuntimeError(
-                $"organ '{fn.Name}' takes {fn.Params.Count} argument(s), got {c.Args.Count}", c.Tok);
-
-        var argv = c.Args.Select(Eval).ToList();
-        for (int i = 0; i < argv.Count; i++)
-            RequireType(argv[i], fn.Params[i].Type, c.Tok,
-                $"argument {i + 1} of '{fn.Name}' expects {Name(fn.Params[i].Type)}, " +
-                $"got {Name(argv[i].Type)}");
-
-        PushScope();
-        for (int i = 0; i < argv.Count; i++)
-            Define(fn.Params[i].Name, new Cell(argv[i], true, fn.Params[i].Tok), fn.Params[i].Tok);
-
-        Value result;
-        try
-        {
-            ExecBlock(fn.Body);
-            // falling off the end of a non-void function is a bug in the program
-            throw new BioRuntimeError(
-                $"organ '{fn.Name}' finished without returning a {Name(fn.ReturnType)}", fn.Tok);
-        }
-        catch (ReturnSignal r)
-                {
-                    result = r.Value;
-                }
-                catch (BreakSignal)
-                {
-                    throw new BioRuntimeError(
-                        $"sever is only valid inside a loop, and this one is inside organ '{fn.Name}'", fn.Tok);
-                }
-                catch (ContinueSignal)
-                {
-                    throw new BioRuntimeError(
-                        $"skip is only valid inside a loop, and this one is inside organ '{fn.Name}'", fn.Tok);
-                }
-                finally
-        {
-            PopScope();
+            // A named organ closes over the GLOBAL scope only. Capturing the caller's
+            // locals would make it dynamically scoped, which is not what anyone means
+            // by lexical scope.
+            var globals = new List<Dictionary<string, Cell>> { _scopes[0] };
+            return CallClosure(
+                new BioClosure(fn.Name, fn.Params, fn.ReturnType, fn.Body, globals),
+                c.Args, c.Tok);
         }
 
-        RequireType(result, fn.ReturnType, c.Tok,
-            $"organ '{fn.Name}' declared -> {Name(fn.ReturnType)} but returned {Name(result.Type)}");
-        return result;
-    }
-
-    private Value CallMethod(MethodCall mc)
+        // The single path every call goes through: named organ or anonymous spore.
+        private Value CallClosure(BioClosure cl, List<Expr> argExprs, Token tok)
         {
-            var target = Eval(mc.Target);
-            if (target.Type != BioType.Colony)
-                throw new BioRuntimeError($"'.{mc.Name}' is only defined on colony", mc.Tok);
+            if (argExprs.Count != cl.Params.Count)
+                throw new BioRuntimeError(
+                    $"'{cl.Label}' takes {cl.Params.Count} argument(s), got {argExprs.Count}", tok);
+
+            var argv = argExprs.Select(Eval).ToList();
+            for (int i = 0; i < argv.Count; i++)
+                RequireType(argv[i], cl.Params[i].Type, tok,
+                    $"argument {i + 1} of '{cl.Label}' expects {cl.Params[i].Type}, " +
+                    $"got {argv[i].TypeLabel}");
+
+            // Swap in the captured scopes, then a frame for the parameters. The
+            // caller's scopes are set aside and restored in finally, so a closure
+            // cannot accidentally see the locals of whoever called it.
+            var callerScopes = _scopes.ToList();
+            _scopes.Clear();
+            _scopes.AddRange(cl.Captured);
+            PushScope();
+            for (int i = 0; i < argv.Count; i++)
+                Define(cl.Params[i].Name, new Cell(argv[i], true, cl.Params[i].Tok), cl.Params[i].Tok);
+
+            Value result;
+            try
+            {
+                ExecBlock(cl.Body);
+                // falling off the end of a non-void function is a bug in the program
+                throw new BioRuntimeError(
+                    $"'{cl.Label}' finished without returning a {cl.ReturnType}", tok);
+            }
+            catch (ReturnSignal r)
+            {
+                result = r.Value;
+            }
+            catch (BreakSignal)
+            {
+                throw new BioRuntimeError(
+                    $"sever is only valid inside a loop, and this one is inside '{cl.Label}'", tok);
+            }
+            catch (ContinueSignal)
+            {
+                throw new BioRuntimeError(
+                    $"skip is only valid inside a loop, and this one is inside '{cl.Label}'", tok);
+            }
+            finally
+            {
+                _scopes.Clear();
+                _scopes.AddRange(callerScopes);
+            }
+
+            RequireType(result, cl.ReturnType, tok,
+                $"'{cl.Label}' declared -> {cl.ReturnType} but returned {result.TypeLabel}");
+            return result;
+        }
+
+        // A shallow copy of the scope stack. The dictionaries are shared on purpose:
+        // a closure should see later changes to a variable it captured, which is what
+        // every language with closures does.
+        private List<Dictionary<string, Cell>> SnapshotScopes() => _scopes.ToList();
+
+        private bool TryLookup(string name, out Cell cell)
+        {
+            for (int i = _scopes.Count - 1; i >= 0; i--)
+                if (_scopes[i].TryGetValue(name, out var c)) { cell = c; return true; }
+            cell = null!;
+            return false;
+        }
+
+        // Reading an identifier: a variable, or the name of an organ, which becomes a
+        // closure over the global scope.
+        private Value EvalIdent(Ident i)
+        {
+            if (TryLookup(i.Name, out var cell)) return cell.Val;
+
+            if (_fns.TryGetValue(i.Name, out var fn))
+                return new Value(BioType.Organ,
+                    new BioClosure(fn.Name, fn.Params, fn.ReturnType, fn.Body,
+                                   new List<Dictionary<string, Cell>> { _scopes[0] }));
+
+            throw new BioRuntimeError($"'{i.Name}' is not defined", i.Tok);
+                }
+
+                private Value CallMethod(MethodCall mc)
+                        {
+                            var target = Eval(mc.Target);
+
+                            // A method on a membrane: find the organ in its declaration and call
+                            // it with the instance's fields in scope, so `r` means this record's
+                            // `r` rather than any outer binding of that name.
+                            if (target.Type == BioType.Membrane)
+                            {
+                                var st = (BioStruct)target.Raw;
+                                var decl = _membranes[st.TypeName];
+                                var method = decl.Methods.FirstOrDefault(x => x.Name == mc.Name);
+                                if (method is null)
+                                {
+                                    var have = decl.Methods.Select(x => x.Name).ToList();
+                                    throw new BioRuntimeError(
+                                        $"membrane '{st.TypeName}' has no method '{mc.Name}'"
+                                        + (have.Count > 0 ? " (it has: " + string.Join(", ", have) + ")" : ""),
+                                        mc.Tok);
+                                }
+
+                                var frame = new Dictionary<string, Cell>(StringComparer.Ordinal);
+                                                foreach (var kv in st.Fields) frame[kv.Key] = new Cell(kv.Value, true, mc.Tok);
+
+                                                var closure = new BioClosure(
+                                                    st.TypeName + "." + mc.Name, method.Params, method.ReturnType, method.Body,
+                                                    new List<Dictionary<string, Cell>> { frame });
+
+                                                // Copy the frame back after the call. The fields were copied INTO
+                                                // the scope, so without this `h = h + 1` inside a method would
+                                                // update a local and the instance would never change - which is
+                                                // not what a method means.
+                                                var result = CallClosure(closure, mc.Args, mc.Tok);
+                                                foreach (var kv in frame)
+                                                    if (st.Fields.ContainsKey(kv.Key)) st.Fields[kv.Key] = kv.Value.Val;
+                                                return result;
+                            }
+
+                            if (target.Type != BioType.Colony)
+                                throw new BioRuntimeError($".{mc.Name}() is not defined on {target.TypeLabel}", mc.Tok);
 
             var list = (List<Value>)target.Raw;
 
@@ -660,10 +953,38 @@ public sealed class Interpreter
     }
 
     // ------------------------------------------------------------------ helpers
-    private static void RequireType(Value v, BioType want, Token tok, string msg)
-    {
-        if (v.Type != want) throw new BioRuntimeError(msg, tok);
-    }
+    private void RequireType(Value v, TypeRef want, Token tok, string msg)
+            {
+                bool ok;
+
+                if (want.Kind == BioType.Membrane)
+                {
+                    // The parser cannot tell a membrane name from a trait name, so the
+                    // interpreter resolves it: a trait is satisfied by promising it, a
+                    // membrane by being that exact membrane.
+                    if (_traits.TryGetValue(want.Name!, out var trait))
+                    {
+                        ok = v.Type == BioType.Membrane && v.TypeName is not null
+                             && _membranes.TryGetValue(v.TypeName, out var mdecl)
+                             && mdecl.Traits.Any(t => t.Trait == trait.Name);
+                    }
+                    else
+                    {
+                        ok = v.Type == BioType.Membrane
+                             && string.Equals(v.TypeName, want.Name, StringComparison.Ordinal);
+                    }
+                }
+                else
+                {
+                    ok = v.Type == want.Kind;
+                }
+
+                if (!ok) throw new BioRuntimeError(msg, tok);
+            }
+
+        // The declared type of a value, for assignment checks against an existing cell.
+        private static TypeRef ToTypeRef(Value v) =>
+            v.Type == BioType.Membrane ? TypeRef.Membrane(v.TypeName ?? "membrane") : new TypeRef(v.Type);
 
     private static string Name(BioType t) => t switch
     {
@@ -682,8 +1003,15 @@ public sealed class Interpreter
         BioType.Enzyme => (bool)v.Raw ? "active" : "dormant",
         BioType.Dna => Fmt((double)v.Raw),
         BioType.Colony => "[" + string.Join(", ", ((List<Value>)v.Raw).Select(Display)) + "]",
-        _ => "void",
-    };
+                BioType.Membrane => FormatStruct((BioStruct)v.Raw),
+                BioType.Organ => "<organ " + ((BioClosure)v.Raw).Label + ">",
+                _ => "void",
+            };
+
+            // Point { x = 1, y = 2 } - named, so printing two different records is not
+            // ambiguous, and fields in declaration order so output is stable.
+            private static string FormatStruct(BioStruct s) =>
+                s.TypeName + " { " + string.Join(", ", s.Fields.Select(kv => kv.Key + " = " + Display(kv.Value))) + " }";
 
     private static string Fmt(double d)
     {

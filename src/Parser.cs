@@ -22,7 +22,37 @@ using System.Globalization;
 
 namespace BioLang;
 
-public enum BioType { Rna, Dna, Enzyme, Colony, Void }
+public enum BioType { Rna, Dna, Enzyme, Colony, Membrane, Organ, Void }
+
+// A declared type. The old flat enum could not name anything the program
+// defined, which is exactly why `membrane` had nowhere to live: a struct's type
+// IS its name. Kind says what class of value it is; Name is set only for
+// membranes, so `dna` and `Point` are distinguishable without a second enum.
+public sealed record TypeRef(BioType Kind, string? Name = null)
+{
+    public static readonly TypeRef Rna = new(BioType.Rna);
+    public static readonly TypeRef Dna = new(BioType.Dna);
+    public static readonly TypeRef Enzyme = new(BioType.Enzyme);
+    public static readonly TypeRef Colony = new(BioType.Colony);
+
+    public static TypeRef Membrane(string name) => new(BioType.Membrane, name);
+
+    // How the type reads in an error message.
+    public override string ToString() => Name ?? Kind switch
+    {
+        BioType.Rna => "rna",
+        BioType.Dna => "dna",
+        BioType.Enzyme => "enzyme",
+        BioType.Colony => "colony",
+        _ => "void",
+    };
+
+    public bool SameAs(TypeRef other) =>
+        Kind == other.Kind && string.Equals(Name, other.Name, StringComparison.Ordinal);
+}
+
+// A field on a membrane: a name and its declared type.
+public sealed record FieldDecl(TypeRef Type, string Name, Token Tok);
 
 public abstract record Node;
 public abstract record Expr : Node;
@@ -37,16 +67,24 @@ public sealed record Ident(string Name, Token Tok) : Expr;
 public sealed record Binary(string Op, Expr L, Expr R, Token Tok) : Expr;
 public sealed record Unary(string Op, Expr E, Token Tok) : Expr;
 public sealed record Call(string Name, List<Expr> Args, Token Tok) : Expr;
+// A call through a value rather than a name: `f(1)` where f holds an organ, or
+// the result of any expression that yields one.
+public sealed record Invoke(Expr Callee, List<Expr> Args, Token Tok) : Expr;
+// `spore (dna n) -> dna { return n * 2 }` - an anonymous function.
+public sealed record LambdaLit(List<Param> Params, TypeRef ReturnType, Block Body, Token Tok) : Expr;
 public sealed record Member(Expr Target, string Name, Token Tok) : Expr;
 public sealed record MethodCall(Expr Target, string Name, List<Expr> Args, Token Tok) : Expr;
 public sealed record Index(Expr Target, Expr Key, Token Tok) : Expr;
 
 // ---------------------------------------------------------------- statements
-public sealed record Param(BioType Type, string Name, Token Tok);
+public sealed record Param(TypeRef Type, string Name, Token Tok);
 public sealed record Block(List<Stmt> Body) : Node;
 
-public sealed record VarDecl(bool Mutable, BioType Type, string Name, Expr Init, Token Tok) : Stmt;
+public sealed record VarDecl(bool Mutable, TypeRef Type, string Name, Expr Init, Token Tok) : Stmt;
 public sealed record Assign(string Name, Expr Value, Token Tok) : Stmt;
+// Assigning to a field: `p.x = 5`. A separate node rather than a general
+// lvalue, because a field is the only mutable location besides a variable.
+public sealed record FieldAssign(Expr Target, string Field, Expr Value, Token Tok) : Stmt;
 public sealed record IfStmt(Expr Cond, Block Then, Block? Else) : Stmt;
 public sealed record WhileStmt(Expr Cond, Block Body, Token Tok) : Stmt;
 public sealed record PrintStmt(Expr Value, Token Tok) : Stmt;
@@ -59,11 +97,27 @@ public sealed record ContinueStmt(Token Tok) : Stmt;
 public sealed record ForStmt(Stmt? Init, Expr? Cond, Stmt? Step, Block Body, Token Tok) : Stmt;
 public sealed record GraftStmt(string Path, Token Tok) : Stmt;
 
-public sealed record FunctionDecl(BioType ReturnType, string Name, List<Param> Params,
+public sealed record FunctionDecl(TypeRef ReturnType, string Name, List<Param> Params,
                                   Block Body, Token Tok) : Node;
 public sealed record MainDecl(Block Body, Token Tok) : Node;
-public sealed record Program(string Name, List<FunctionDecl> Functions, MainDecl? Main,
-                                 List<Stmt> TopLevel, Token Tok) : Node;
+
+// `membrane Point { dna x  dna y }` - a named record with typed fields, and
+// optionally the organs that make its behaviour, and the traits it promises.
+public sealed record MembraneDecl(string Name, List<FieldDecl> Fields,
+                                  List<FunctionDecl> Methods, List<(string Trait, Token Tok)> Traits,
+                                  Token Tok) : Node;
+
+// `trait Shape { organ area() -> dna }` - a promise about behaviour.
+// The signatures carry no body: a trait says what must exist, not what it does.
+public sealed record TraitDecl(string Name, List<FunctionDecl> Signatures, Token Tok) : Node;
+
+// `Point { x = 1, y = 2 }` - construction. Every field must be given; a partial
+// record with undefined fields is a source of bugs, not a feature.
+public sealed record StructLit(string Name, List<(string Field, Expr Value)> Fields, Token Tok) : Expr;
+
+public sealed record Program(string Name, List<FunctionDecl> Functions, List<MembraneDecl> Membranes,
+                             List<TraitDecl> Traits,
+                             MainDecl? Main, List<Stmt> TopLevel, Token Tok) : Node;
 
 // -------------------------------------------------------------------- parser
 public sealed class Parser
@@ -98,6 +152,8 @@ public sealed class Parser
         Expect(TokKind.LBrace, "'{'");
 
         var fns = new List<FunctionDecl>();
+        var mems = new List<MembraneDecl>();
+        var traits = new List<TraitDecl>();
         MainDecl? main = null;
         var top = new List<Stmt>();
 
@@ -105,6 +161,10 @@ public sealed class Parser
         {
             if (At(TokKind.Organ))
                 fns.Add(ParseFunction());
+            else if (At(TokKind.Trait))
+                traits.Add(ParseTrait());
+            else if (At(TokKind.Membrane))
+                mems.Add(ParseMembrane());
             else if (At(TokKind.Nucleus))
             {
                 if (main is not null)
@@ -120,7 +180,106 @@ public sealed class Parser
 
         Expect(TokKind.RBrace, "'}'");
         Expect(TokKind.EOF, "end of file");
-        return new Program(name, fns, main, top, tok);
+        return new Program(name, fns, mems, traits, main, top, tok);
+    }
+
+    // trait Shape { organ area() -> dna  organ name() -> rna }
+    private TraitDecl ParseTrait()
+    {
+        var tok = Expect(TokKind.Trait, "'trait'");
+        string name = Expect(TokKind.Identifier, "trait name").Text;
+        Expect(TokKind.LBrace, "'{'");
+
+        var sigs = new List<FunctionDecl>();
+        while (!At(TokKind.RBrace) && !At(TokKind.EOF))
+        {
+            if (!At(TokKind.Organ))
+                throw new BioSyntaxError(
+                    $"a trait may only declare organs, found '{Cur.Text}'", Cur);
+
+            var ftok = Expect(TokKind.Organ, "'organ'");
+            string mname = Expect(TokKind.Identifier, "method name").Text;
+            Expect(TokKind.LParen, "'('");
+            var ps = new List<Param>();
+            if (!At(TokKind.RParen))
+            {
+                do
+                {
+                    var pt = ParseType();
+                    var pn = Expect(TokKind.Identifier, "parameter name");
+                    ps.Add(new Param(pt, pn.Text, pn));
+                } while (Match(TokKind.Comma));
+            }
+            Expect(TokKind.RParen, "')'");
+            Expect(TokKind.Arrow, "'->'");
+            var ret = ParseType();
+            // A signature has no body. An empty Block stands in so the shared
+            // FunctionDecl shape can be reused rather than a parallel record.
+            sigs.Add(new FunctionDecl(ret, mname, ps, new Block(new List<Stmt>()), ftok));
+        }
+        Expect(TokKind.RBrace, "'}'");
+
+        if (sigs.Count == 0)
+            throw new BioSyntaxError($"trait '{name}' declares no organs", tok);
+        var dupes = sigs.GroupBy(x => x.Name).Where(g => g.Count() > 1).Select(g => g.Key).ToList();
+        if (dupes.Count > 0)
+            throw new BioSyntaxError($"trait '{name}' declares '{dupes[0]}' more than once", tok);
+
+        return new TraitDecl(name, sigs, tok);
+    }
+
+    // membrane Circle witnesses Shape { dna r  organ area() -> dna { ... } }
+    private MembraneDecl ParseMembrane()
+    {
+        var tok = Expect(TokKind.Membrane, "'membrane'");
+        string name = Expect(TokKind.Identifier, "membrane name").Text;
+
+        var promises = new List<(string, Token)>();
+        if (Match(TokKind.Witnesses))
+        {
+            do
+            {
+                var tt = Expect(TokKind.Identifier, "trait name");
+                promises.Add((tt.Text, tt));
+            } while (Match(TokKind.Comma));
+        }
+
+        Expect(TokKind.LBrace, "'{'");
+
+        var fields = new List<FieldDecl>();
+        var methods = new List<FunctionDecl>();
+
+        while (!At(TokKind.RBrace) && !At(TokKind.EOF))
+        {
+            Match(TokKind.Comma);
+            if (At(TokKind.RBrace)) break;
+
+            if (At(TokKind.Organ))
+            {
+                methods.Add(ParseFunction());
+                continue;
+            }
+
+            var type = ParseType();
+            var fieldTok = Expect(TokKind.Identifier, "field name");
+            fields.Add(new FieldDecl(type, fieldTok.Text, fieldTok));
+        }
+        Expect(TokKind.RBrace, "'}'");
+
+        if (fields.Count == 0 && methods.Count == 0)
+            throw new BioSyntaxError($"membrane '{name}' declares nothing", tok);
+
+        var dupes = fields.GroupBy(f => f.Name).Where(g => g.Count() > 1).Select(g => g.Key).ToList();
+        if (dupes.Count > 0)
+            throw new BioSyntaxError(
+                $"membrane '{name}' declares field '{dupes[0]}' more than once", tok);
+
+        var mdupes = methods.GroupBy(m => m.Name).Where(g => g.Count() > 1).Select(g => g.Key).ToList();
+        if (mdupes.Count > 0)
+            throw new BioSyntaxError(
+                $"membrane '{name}' declares organ '{mdupes[0]}' more than once", tok);
+
+        return new MembraneDecl(name, fields, methods, promises, tok);
     }
 
     private FunctionDecl ParseFunction()
@@ -155,16 +314,26 @@ public sealed class Parser
         return new MainDecl(ParseBlock(), tok);
     }
 
-    private BioType ParseType()
+    // Accepts the four builtin types and any name declared by a `membrane`. The name
+// is not resolved here: the interpreter owns the registry, and validating in the
+// parser would mean two sources of truth for what exists.
+    private TypeRef ParseType()
     {
-        var t = Cur.Kind switch
+        TypeRef t;
+        switch (Cur.Kind)
         {
-            TokKind.Rna => BioType.Rna,
-            TokKind.Dna => BioType.Dna,
-            TokKind.Enzyme => BioType.Enzyme,
-            TokKind.Colony => BioType.Colony,
-            _ => throw new BioSyntaxError($"expected a type (rna, dna, enzyme, colony), found '{Cur.Text}'", Cur),
-        };
+            case TokKind.Rna:     t = TypeRef.Rna; break;
+            case TokKind.Dna:     t = TypeRef.Dna; break;
+            case TokKind.Enzyme:  t = TypeRef.Enzyme; break;
+            case TokKind.Colony:  t = TypeRef.Colony; break;
+            // `organ` as a type: a parameter or field that takes a function.
+            case TokKind.Organ:   t = new TypeRef(BioType.Organ); break;
+            case TokKind.Identifier: t = TypeRef.Membrane(Cur.Text); break;
+            default:
+                throw new BioSyntaxError(
+                    $"expected a type (rna, dna, enzyme, colony, organ, or a membrane name), found '{Cur.Text}'",
+                    Cur);
+        }
         _p++;
         return t;
     }
@@ -238,6 +407,19 @@ public sealed class Parser
 
             default:
             {
+                // p.x = 5  -- assignment to a field.
+                if (At(TokKind.Identifier) && Peek().Kind == TokKind.Dot
+                    && Peek(2).Kind == TokKind.Identifier && Peek(3).Kind == TokKind.Assign)
+                {
+                    var baseTok = _t[_p++];
+                    Expect(TokKind.Dot, "'.'");
+                    var fieldTok = Expect(TokKind.Identifier, "field name");
+                    Expect(TokKind.Assign, "'='");
+                    var val = ParseExpr();
+                    Match(TokKind.Semicolon);
+                    return new FieldAssign(new Ident(baseTok.Text, baseTok), fieldTok.Text, val, fieldTok);
+                }
+
                 // Assignment or a bare expression statement.
                 if (At(TokKind.Identifier) && Peek().Kind == TokKind.Assign)
                 {
@@ -254,7 +436,10 @@ public sealed class Parser
                 // OWN fibonacci example uses it, so rejecting it would mean the
                 // language cannot run the program it ships with. A bare
                 // declaration is treated as mutable.
-                if (IsTypeToken(Cur.Kind) && Peek().Kind == TokKind.Identifier
+                //
+                // An identifier in the type position is a membrane name, so this
+                // also covers `Point p = Point { ... }`.
+                if (TypeStartsHere() && Peek().Kind == TokKind.Identifier
                     && Peek(2).Kind == TokKind.Assign)
                 {
                     // Capture the token WITHOUT advancing: ParseType() is what
@@ -276,8 +461,12 @@ public sealed class Parser
         }
     }
 
-    private static bool IsTypeToken(TokKind k) =>
-        k is TokKind.Rna or TokKind.Dna or TokKind.Enzyme or TokKind.Colony;
+    // True when the current token could begin a type: one of the four builtins,
+    // or an identifier naming a membrane.
+    private bool TypeStartsHere() =>
+        Cur.Kind is TokKind.Rna or TokKind.Dna or TokKind.Enzyme or TokKind.Colony
+                      or TokKind.Organ
+        || Cur.Kind == TokKind.Identifier;
 
     private Stmt ParseVarDecl()
     {
@@ -359,7 +548,7 @@ public sealed class Parser
             return new Assign(nameTok.Text, ParseExpr(), nameTok);
         }
 
-        if (IsTypeToken(Cur.Kind) && Peek().Kind == TokKind.Identifier
+        if (TypeStartsHere() && Peek().Kind == TokKind.Identifier
             && Peek(2).Kind == TokKind.Assign)
         {
             var tok = Cur;
@@ -468,6 +657,22 @@ public sealed class Parser
                 e = new Index(e, key, br);
                 continue;
             }
+
+            // Calling whatever the expression produced: `makeAdder(2)(3)`.
+            // A plain name followed by "(" is parsed as Call in ParsePrimary, so
+            // this only fires for a callee that is not a bare identifier.
+            if (At(TokKind.LParen) && e is not Ident)
+            {
+                var pt = _t[_p++];
+                var args = new List<Expr>();
+                if (!At(TokKind.RParen))
+                {
+                    do { args.Add(ParseExpr()); } while (Match(TokKind.Comma));
+                }
+                Expect(TokKind.RParen, "')'");
+                e = new Invoke(e, args, pt);
+                continue;
+            }
             return e;
         }
     }
@@ -514,6 +719,28 @@ public sealed class Parser
                 return e;
             }
 
+            // spore (dna n) -> dna { return n * 2 }
+            case TokKind.Spore:
+            {
+                _p++;
+                Expect(TokKind.LParen, "'('");
+                var ps = new List<Param>();
+                if (!At(TokKind.RParen))
+                {
+                    do
+                    {
+                        var pt = ParseType();
+                        var pn = Expect(TokKind.Identifier, "parameter name");
+                        ps.Add(new Param(pt, pn.Text, pn));
+                    } while (Match(TokKind.Comma));
+                }
+                Expect(TokKind.RParen, "')'");
+                Expect(TokKind.Arrow, "'->'");
+                var ret = ParseType();
+                var body = ParseBlock();
+                return new LambdaLit(ps, ret, body, tok);
+            }
+
             case TokKind.Identifier:
             {
                 _p++;
@@ -527,6 +754,24 @@ public sealed class Parser
                     }
                     Expect(TokKind.RParen, "')'");
                     return new Call(tok.Text, args, tok);
+                }
+                // `Point { x = 1, y = 2 }` - construction. A brace after a bare
+                // identifier is unambiguous: every other construct that opens a
+                // block is preceded by a keyword or a closing paren.
+                if (At(TokKind.LBrace))
+                {
+                    _p++;
+                    var fields = new List<(string, Expr)>();
+                    while (!At(TokKind.RBrace) && !At(TokKind.EOF))
+                    {
+                        Match(TokKind.Comma);
+                        if (At(TokKind.RBrace)) break;
+                        var fieldTok = Expect(TokKind.Identifier, "field name");
+                        Expect(TokKind.Assign, "'='");
+                        fields.Add((fieldTok.Text, ParseExpr()));
+                    }
+                    Expect(TokKind.RBrace, "'}'");
+                    return new StructLit(tok.Text, fields, tok);
                 }
                 return new Ident(tok.Text, tok);
             }

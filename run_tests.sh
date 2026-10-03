@@ -325,6 +325,251 @@ run "top-level statements run before nucleus" \
   'organism T { cell dna shared = 7 nucleus() { secrete(shared) } }' "7"
 
 echo ""
+echo "  ---- v1.2: membrane (structs) ----"
+run "a membrane constructs and prints" \
+  'organism T {
+     membrane Point { dna x  dna y }
+     nucleus() { cell Point p = Point { x = 1, y = 2 } secrete(p) }
+   }' "Point { x = 1, y = 2 }"
+run "a field reads" \
+  'organism T {
+     membrane Point { dna x  dna y }
+     nucleus() { cell Point p = Point { x = 7, y = 2 } secrete(p.x) }
+   }' "7"
+run "a field assigns and the instance keeps it" \
+  'organism T {
+     membrane Point { dna x  dna y }
+     nucleus() { cell Point p = Point { x = 1, y = 2 } p.x = 99 secrete(p) }
+   }' "Point { x = 99, y = 2 }"
+run "a membrane can hold another membrane" \
+  'organism T {
+     membrane Point { dna x  dna y }
+     membrane Line { Point a  Point b }
+     nucleus() {
+       cell Line l = Line { a = Point { x = 0, y = 0 }, b = Point { x = 3, y = 4 } }
+       secrete(l.b.x)
+     }
+   }' "3"
+run "a membrane passes to an organ and back" \
+  'organism T {
+     membrane Point { dna x  dna y }
+     organ getX(Point p) -> dna { return p.x }
+     nucleus() { secrete(getX(Point { x = 42, y = 0 })) }
+   }' "42"
+run "an rna field works too" \
+  'organism T {
+     membrane Named { rna name  dna score }
+     nucleus() { cell Named n = Named { name = "ada", score = 10 } secrete(n.name) }
+   }' "ada"
+run "records are references, so a field write is visible" \
+  'organism T {
+     membrane Point { dna x  dna y }
+     organ bump(Point p) -> dna { p.x = p.x + 1 return p.x }
+     nucleus() {
+       cell Point p = Point { x = 5, y = 0 }
+       secrete(bump(p))
+       secrete(p.x)
+     }
+   }' "6
+6"
+
+err "a missing field is refused" \
+  'organism T { membrane Point { dna x  dna y } nucleus() { cell Point p = Point { x = 1 } } }' \
+  "missing field"
+err "an unknown field is refused" \
+  'organism T { membrane Point { dna x } nucleus() { cell Point p = Point { x = 1, z = 2 } } }' \
+  "has no field"
+err "a wrong field type is refused" \
+  'organism T { membrane Point { dna x } nucleus() { cell Point p = Point { x = "no" } } }' \
+  "field 'x' of Point is dna, got rna"
+err "an unknown membrane is refused" \
+  'organism T { nucleus() { cell Thing t = Thing { a = 1 } } }' \
+  "is not a membrane"
+err "two membranes are not interchangeable" \
+  'organism T {
+     membrane Point { dna x }
+     membrane Line { dna x }
+     nucleus() { cell Point p = Point { x = 1 } cell Line l = p }
+   }' \
+  "cannot store Point in Line"
+err "a duplicate membrane name is refused" \
+  'organism T {
+     membrane P { dna x }
+     membrane P { dna y }
+     nucleus() { }
+   }' \
+  "declared more than once"
+err "a field of an unknown membrane type is refused" \
+  'organism T { membrane P { Ghost g } nucleus() { } }' \
+  "unknown type"
+
+echo ""
+echo "  ---- v1.2: closures and higher-order organs ----"
+run "a spore captures the variable it closed over" \
+  'organism T {
+     organ makeAdder(dna n) -> organ { return spore (dna x) -> dna { return x + n } }
+     nucleus() { cell organ add5 = makeAdder(5) secrete(add5(10)) }
+   }' "15"
+run "two closures from one organ do not share state" \
+  'organism T {
+     organ makeAdder(dna n) -> organ { return spore (dna x) -> dna { return x + n } }
+     nucleus() {
+       cell organ a = makeAdder(5)
+       cell organ b = makeAdder(100)
+       secrete(a(10))
+       secrete(b(10))
+     }
+   }' "15
+110"
+run "an organ passes as an argument and is called" \
+  'organism T {
+     organ applyTwice(organ f, dna v) -> dna { return f(f(v)) }
+     organ double(dna n) -> dna { return n * 2 }
+     nucleus() { secrete(applyTwice(double, 3)) }
+   }' "12"
+run "a closure passes as an argument too" \
+  'organism T {
+     organ makeAdder(dna n) -> organ { return spore (dna x) -> dna { return x + n } }
+     organ applyTwice(organ f, dna v) -> dna { return f(f(v)) }
+     nucleus() { cell organ add5 = makeAdder(5) secrete(applyTwice(add5, 1)) }
+   }' "11"
+run "an anonymous spore binds to a variable and runs" \
+  'organism T {
+     nucleus() { cell organ dbl = spore (dna n) -> dna { return n * 2 } secrete(dbl(21)) }
+   }' "42"
+run "a closure keeps its capture after the maker returns" \
+  'organism T {
+     organ counter() -> organ {
+       cell dna n = 0
+       return spore () -> dna { n = n + 1 return n }
+     }
+     nucleus() {
+       cell organ c = counter()
+       secrete(c())
+       secrete(c())
+       secrete(c())
+     }
+   }' "1
+2
+3"
+run "a closure is printed as an organ" \
+  'organism T {
+     organ f(dna n) -> dna { return n }
+     nucleus() { cell organ g = f secrete(g) }
+   }' "<organ f>"
+err "calling a non-organ is refused" \
+  'organism T { nucleus() { cell dna x = 1 cell dna y = x(2) } }' \
+  "not something callable"
+err "a closure with the wrong argument type is refused" \
+  'organism T {
+     organ make(dna n) -> organ { return spore (dna x) -> dna { return x } }
+     nucleus() { cell organ f = make(1) f("text") }
+   }' \
+  "expects dna, got rna"
+err "an unknown organ name still reports clearly" \
+  'organism T { nucleus() { definitelyNotHere() } }' \
+  "no organ named"
+
+echo ""
+echo "  ---- v1.2: traits, methods, and polymorphism ----"
+run "a method on a membrane runs with its fields in scope" \
+  'organism T {
+     membrane Circle { dna r  organ area() -> dna { return 3 * r * r } }
+     nucleus() { cell Circle c = Circle { r = 2 } secrete(c.area()) }
+   }' "12"
+run "two membranes with the same method name do not collide" \
+  'organism T {
+     membrane Circle { dna r  organ area() -> dna { return 3 * r * r } }
+     membrane Square { dna side  organ area() -> dna { return side * side } }
+     nucleus() {
+       cell Circle c = Circle { r = 2 }
+       cell Square q = Square { side = 3 }
+       secrete(c.area())
+       secrete(q.area())
+     }
+   }' "12
+9"
+run "an organ taking a trait accepts any membrane that witnesses it" \
+  'organism T {
+     trait Shape { organ area() -> dna }
+     membrane Circle witnesses Shape { dna r  organ area() -> dna { return 3 * r * r } }
+     membrane Square witnesses Shape { dna side  organ area() -> dna { return side * side } }
+     organ total(Shape a, Shape b) -> dna { return a.area() + b.area() }
+     nucleus() {
+       cell Circle c = Circle { r = 2 }
+       cell Square q = Square { side = 3 }
+       secrete(total(c, q))
+     }
+   }' "21"
+run "a trait method returning rna works through the trait" \
+  'organism T {
+     trait Named { organ name() -> rna }
+     membrane Dog witnesses Named { rna tag  organ name() -> rna { return "dog:" + tag } }
+     organ show(Named n) -> rna { return n.name() }
+     nucleus() { secrete(show(Dog { tag = "rex" })) }
+   }' "dog:rex"
+run "a method may take arguments" \
+  'organism T {
+     membrane Counter { dna n  organ plus(dna by) -> dna { return n + by } }
+     nucleus() { cell Counter c = Counter { n = 10 } secrete(c.plus(5)) }
+   }' "15"
+run "a method may read a field and mutate another" \
+  'organism T {
+     membrane Box { dna w  dna h  organ grow() -> dna { h = h + 1 return w * h } }
+     nucleus() { cell Box b = Box { w = 2, h = 2 } secrete(b.grow()) secrete(b.grow()) }
+   }' "6
+8"
+
+err "a membrane that does not witness a trait is refused" \
+  'organism T {
+     trait Shape { organ area() -> dna }
+     membrane Blob { dna w  organ area() -> dna { return w } }
+     organ use(Shape s) -> dna { return s.area() }
+     nucleus() { cell Blob b = Blob { w = 1 } use(b) }
+   }' \
+  "expects Shape, got Blob"
+err "witnessing a trait without implementing it is refused" \
+  'organism T {
+     trait Shape { organ area() -> dna  organ name() -> rna }
+     membrane Dot witnesses Shape { dna x  organ area() -> dna { return x } }
+     nucleus() { }
+   }' \
+  "does not implement 'name'"
+err "witnessing an unknown trait is refused" \
+  'organism T { membrane Dot witnesses Nope { dna x } nucleus() { } }' \
+  "unknown trait"
+err "a method with the wrong return type is refused" \
+  'organism T {
+     trait Shape { organ area() -> dna }
+     membrane Dot witnesses Shape { dna x  organ area() -> rna { return "no" } }
+     nucleus() { }
+   }' \
+  "returns rna but Shape declares dna"
+err "a method with the wrong arity is refused" \
+  'organism T {
+     trait Shape { organ area(dna k) -> dna }
+     membrane Dot witnesses Shape { dna x  organ area() -> dna { return x } }
+     nucleus() { }
+   }' \
+  "takes 0 argument(s) but Shape declares 1"
+err "calling an unknown method names the ones that exist" \
+  'organism T {
+     membrane Circle { dna r  organ area() -> dna { return r } }
+     nucleus() { cell Circle c = Circle { r = 1 } c.nope() }
+   }' \
+  "it has: area"
+err "a name cannot be both a trait and a membrane" \
+  'organism T {
+     trait Shape { organ area() -> dna }
+     membrane Shape { dna x }
+     nucleus() { }
+   }' \
+  "both a trait and a membrane"
+err "a trait body may only declare organs" \
+  'organism T { trait Shape { dna x } nucleus() { } }' \
+  "a trait may only declare organs"
+
+echo ""
 echo "  ---- syntax errors are reported with a position ----"
 err "a missing closing brace" 'organism T { nucleus() { secrete(1)' "SYNTAX ERROR"
 err "an unterminated string" 'organism T { nucleus() { secrete("oops) } }' "unterminated string"

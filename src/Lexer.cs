@@ -18,6 +18,10 @@ public enum TokKind
     Traverse, Sever, Skip,
     // added in v1.1: compound types and modules
     Membrane, Graft,
+    // added in v1.2: anonymous functions
+    Spore,
+    // added in v1.2: traits - declared behaviour a membrane can promise
+    Trait, Witnesses,
     // io
     Secrete, Absorb,
     // types + literals
@@ -65,6 +69,11 @@ public sealed class Lexer
         // v1.1: a membrane is a struct; graft pulls in another organism
         ["membrane"]  = TokKind.Membrane,
         ["graft"]     = TokKind.Graft,
+        // v1.2: a spore is an anonymous function - a value you can pass around
+        ["spore"]     = TokKind.Spore,
+        // v1.2: a trait names behaviour; witnesses is how a membrane promises it
+        ["trait"]     = TokKind.Trait,
+        ["witnesses"] = TokKind.Witnesses,
         ["secrete"]   = TokKind.Secrete,
         ["absorb"]    = TokKind.Absorb,
         ["active"]    = TokKind.Active,

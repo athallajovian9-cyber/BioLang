@@ -52,12 +52,65 @@ Generation Complete:
 | `sever` | break |
 | `skip` | continue |
 | `graft` | pull in another `.bio` file |
-| `secrete` | print |
-| `absorb` | read a line of input |
-| `active` / `dormant` | true / false |
-| `rna` / `dna` / `enzyme` / `colony` | string / number / boolean / array |
+| `membrane` | a struct: named fields, optionally methods |
+| `trait` | a promise about behaviour |
+| `witnesses` | a membrane keeping that promise |
+| `spore` | an anonymous function |
 
-`rna(x)` and `dna(x)` convert explicitly between text and number.
+## Membranes: structs with behaviour
+
+```
+membrane Circle {
+    dna r
+    organ area() -> dna { return 3 * r * r }
+}
+
+cell Circle c = Circle { r = 2 }
+c.area()          // 12
+c.r = 5           // fields assign
+```
+
+Records are **references**: passing one to an organ and mutating a field there is visible to the caller. Every declared field must be supplied at construction — a partially built record is a bug, not a feature.
+
+## Traits: one function, many types
+
+```
+trait Shape {
+    organ area() -> dna
+    organ name() -> rna
+}
+
+membrane Circle witnesses Shape {
+    dna r
+    organ area() -> dna { return 3 * r * r }
+    organ name() -> rna { return "circle" }
+}
+
+membrane Square witnesses Shape {
+    dna side
+    organ area() -> dna { return side * side }
+    organ name() -> rna { return "square" }
+}
+
+organ total(Shape a, Shape b) -> dna { return a.area() + b.area() }
+```
+
+`total(circle, square)` works without a type switch. Witnessing is checked when the program loads: promising `Shape` without implementing `name()` is a load-time error, not a surprise on whichever path happens to call it.
+
+Satisfaction is **nominal, not structural**: a `Blob` that happens to have an `area()` is still refused where a `Shape` is expected. Matching by shape accepts coincidences.
+
+## Closures
+
+```
+organ makeAdder(dna n) -> organ {
+    return spore (dna x) -> dna { return x + n }
+}
+
+cell organ add5 = makeAdder(5)
+add5(10)          // 15
+```
+
+Organs are values: passable, returnable, callable through a variable. A named organ closes over the **global** scope only — capturing the caller's locals would be dynamic scoping.
 
 ## The colony library
 
@@ -121,14 +174,11 @@ reader's trust:
 
 - **Not a compiler.** No bytecode, no JIT, no optimiser. The original
   specification said "compiler"; this is the honest first target instead.
-- **No structs or compound types.** `membrane` is a reserved word with no
-  implementation. It needs a real type-reference system: `ParseType` returns an
-  enum today, so a named type has nowhere to live.
-- **No closures or lambdas.** Functions are top-level declarations only. Passing
-  and returning them needs captured environments, which changes how scoping works
-  throughout.
-- **No generics.** Low value at this size, and awkward before the struct work.
-- **No user-defined operators or namespaces.**
+- **No generics, and I would argue against them.** `colony<T>` would be
+  decoration: the runtime already tags every value, so it adds syntax and no
+  safety. Traits are the polymorphism that was actually missing.
+- **No user-defined operators, no namespaces, no method overloading.**
+- **Traits cannot be composed** — a trait may not require another trait.
 - **Loops are capped** at 1,000,000 iterations so a runaway loop fails loudly
   instead of hanging the machine. Raise it with `--max-loop N`.
 
