@@ -190,16 +190,20 @@
       <div><b>cell</b><em>a variable you can change.</em></div>
       <div><b>fossil</b><em>a constant. enforced, not suggested.</em></div>
       <div><b>mutate</b><em>if.</em></div>
-      <div><b>adapt</b><em>else.</em></div>
+      <div><b>adapt</b><em>else. <code>adapt mutate (...) </code> chains.</em></div>
       <div><b>replicate</b><em>while.</em></div>
+      <div><b>traverse</b><em>counted for. <code>(init; cond; step)</code></em></div>
+      <div><b>sever</b><em>break out of a loop.</em></div>
+      <div><b>skip</b><em>continue to the next iteration.</em></div>
+      <div><b>graft</b><em>pull in another <code>.bio</code> file.</em></div>
       <div><b>secrete</b><em>print.</em></div>
-      <div><b>absorb</b><em>read input. declared, not yet wired.</em></div>
+      <div><b>absorb</b><em>read a line of input.</em></div>
       <div><b>active</b><em>true.</em></div>
       <div><b>dormant</b><em>false.</em></div>
       <div><b>rna</b><em>string.</em></div>
       <div><b>dna</b><em>number.</em></div>
       <div><b>enzyme</b><em>boolean.</em></div>
-      <div><b>colony</b><em>array. <code>.length</code> and <code>.inject()</code></em></div>
+      <div><b>colony</b><em>array. 17 methods</em></div>
     </div>
   </div>
 </section>
@@ -213,10 +217,12 @@
         <ul class="yes">
           <li>Lexer, parser, AST, tree-walking interpreter</li>
           <li>Functions with typed parameters and returns</li>
-          <li><code>mutate</code>/<code>adapt</code>, <code>replicate</code></li>
+          <li><code>mutate</code>/<code>adapt</code>, <code>replicate</code>, <code>traverse</code>, <code>sever</code>, <code>skip</code></li>
           <li>All four types, checked at every boundary</li>
           <li><code>fossil</code> refuses reassign <i>and</i> mutation</li>
           <li>Negative indexing: <code>-1</code> is the last element</li>
+          <li>Modules via <code>graft</code>, with cycle detection</li>
+          <li>Input via <code>absorb</code>; 17 array methods</li>
           <li>Errors carry line and column</li>
         </ul>
       </div>
