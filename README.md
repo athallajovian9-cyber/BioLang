@@ -169,38 +169,64 @@ Written in C#.
 
 ## Self-hosting
 
-The lexer is also written **in BioLang** — `selfhost/lexer.bio`. It reads a `.bio`
-source file and emits the same token stream the C# lexer does.
+Two of the four stages are done. The lexer **and** the parser are written in
+BioLang, and both are checked by **byte-equality against the C# reference** —
+not against hand-written expectations.
 
 ```
-bash selfhost/check_lexer.sh
+bash selfhost/check_lexer.sh        bash selfhost/check_parser.sh
 
 PASS  fibonacci.bio          100 tokens identical
 PASS  lexer.bio             1943 tokens identical
+
+PASS  fibonacci.bio         2994 bytes identical
+PASS  lexlib.bio           53224 bytes identical
+PASS  parser.bio          286200 bytes identical
 ```
 
-It is checked by **byte-equality against the C# reference**, not against
-hand-written expectations. That distinction matters: byte-equality is the only
-test that catches a dropped character, a misread escape, or a column drifting by
-one — and all three happened while this was being written. `lexer.bio` lexing its
-own 266-line source is the interesting case, because it exercises strings with
-escapes, both comment forms and every token type through the self-hosted path.
+The last line of each is the interesting one: the self-hosted code processing its
+own source. The parser parses its own 1,100-line file and produces a tree
+identical to the C# one, all 286 KB of it.
 
-Three bugs came out of that comparison, none findable by reading:
+Byte-equality is the only test that catches a dropped character, a misread
+escape, a column drifting by one, or a precedence level collapsing — and all four
+happened while this was being written.
 
-1. `\r` in a string literal produced the letter `r`, because the C# escape table
-   handled `\n`, `\t`, `\"` and `\\` and **silently dropped the backslash** on
-   anything else. A whitespace check written as a CR literal therefore matched the
-   letter `r`, and every identifier starting with `r` was skipped as whitespace.
-   Unknown escapes are now an error rather than being guessed at.
-2. The same bug again, independently, in the self-hosted lexer's escape table.
-3. `void` was missing from the self-hosted keyword list.
+### What "parser against parser" means here
 
-Status: **stage one of four.**
+`biolang --ast-json` runs a file through `Loader.Load`, which **resolves
+`graft`** and merges the grafted organism's functions into the tree. The
+self-hosted parser emits a graft as a statement, because resolving grafts is the
+Loader's job, not the parser's. So the reference for this check is a new
+`--ast-json-raw` mode that parses one file and resolves nothing.
+
+That distinction was not obvious: the first run showed `fibonacci.bio` and
+`lexlib.bio` identical and `parser.bio` differing, which is exactly which files
+have a graft in them. The comparison had been parser against loader.
+
+### The parser does not materialise nodes
+
+It emits the serialized tree directly as it descends. The recursive-descent
+structure is identical either way; what differs is that the tree exists as the
+call stack rather than as a colony of node objects. Real compilers do this. It is
+stated here rather than dressed up as something it is not.
+
+### Three bugs the comparison caught
+
+1. **`%` is not a BioLang operator.** Modulo does not exist in the language. The
+   hex-digit helper used it, so the parser could not parse its own escape writer.
+2. **`and` / `or` do not exist either.** Twelve compound conditions used them.
+   Each became a named helper, which reads better at the call site anyway —
+   `isBareDecl(p)` says more than three chained comparisons.
+3. **A bare `dna x = 1` declaration needs its own parse function.** `parseVarDecl`
+   skips one token assuming it is the `cell`/`fossil` keyword; for a bare
+   declaration that eats the type and reads `x` as the type instead.
+
+Status: **stage two of four.**
 
 ```
 1  lexer in BioLang       done, byte-identical
-2  parser in BioLang      not started
+2  parser in BioLang      done, byte-identical
 3  evaluator in BioLang   not started
 4  bootstrap              not started
 ```

@@ -1,0 +1,1127 @@
+// BioLang's parser, written in BioLang.
+//
+// Stage 2 of self-hosting. It reads a .bio source, lexes it with the same lexlib
+// the lexer runner uses, and emits the syntax tree in the exact serialized form
+// src/AstJson.cs produces - so the two can be compared BYTE FOR BYTE rather than
+// against hand-written expectations.
+//
+// That distinction is the whole test. It is what caught three bugs in the lexer
+// that reading the code would never have shown.
+//
+// ON THE SHAPE OF THE OUTPUT
+//
+//   This emits the serialized tree directly rather than materializing node
+//   objects first. The recursive descent is the same in both cases; what differs
+//   is that the tree exists as the call stack rather than as a colony of nodes.
+//   That is a real design used by real compilers, and it is stated here rather
+//   than dressed up as something it is not.
+//
+// ON ERRORS
+//
+//   BioLang has no exceptions, so a parse error deliberately triggers a runtime
+//   error rather than producing a partial tree. A tree that is wrong but happens
+//   to match is far worse than a loud stop.
+//
+//   biolang selfhost/parser.bio     (reads a path on stdin, prints the tree)
+organism BioParser {
+    graft "lexlib.bio"
+
+    // A token cursor. A membrane because membranes are references: `c.pos = ...`
+    // inside a parse function has to be visible to the caller, and a plain dna
+    // would be passed by value.
+    membrane P { colony toks  dna pos }
+
+    // ---------------------------------------------------------------- helpers
+
+    organ tokAt(P p, dna i) -> Tok {
+        mutate (i >= p.toks.length) {
+            // Past the end is always the EOF token the lexer appended, and
+            // running off it means the parser asked for one token too many.
+            return p.toks[p.toks.length - 1]
+        }
+        return p.toks[i]
+    }
+
+    organ cur(P p) -> Tok { return tokAt(p, p.pos) }
+    organ ahead(P p, dna n) -> Tok { return tokAt(p, p.pos + n) }
+
+    organ fail(rna expected, rna got) -> rna {
+        // Deliberately loud, and it says WHY before it stops. There are no
+        // exceptions in BioLang, so the stop is a deliberate runtime error.
+        // Producing a partial tree instead would risk it matching by accident,
+        // which is far worse than a crash - a wrong tree that agrees with the
+        // reference teaches nothing and hides the bug.
+        //
+        // The message goes to stdout so it shows up in the comparison diff
+        // rather than being swallowed by a bare "division by zero".
+        secrete("  PARSE ERROR: " + expected + "'" + got + "'")
+        cell dna zero = 0
+        return "" + rna(zero / zero)
+    }
+
+    // -------------------------------------------------------- JSON escaping
+
+    // The same escapes src/AstJson.cs writes. Anything outside ASCII printable
+    // becomes a \u escape, so the two implementations cannot disagree about a
+    // control character or a non-Latin name.
+    organ esc(rna s) -> rna {
+        cell rna out = ""
+        traverse (cell dna i = 0; i < s.length; i = i + 1) {
+            cell rna c = s[i]
+            cell dna code = ord(c)
+            mutate (c == chr(34)) { out = out + chr(92) + chr(34) }
+                adapt mutate (c == chr(92)) { out = out + chr(92) + chr(92) }
+                adapt mutate (c == chr(10)) { out = out + chr(92) + "n" }
+                adapt mutate (c == chr(13)) { out = out + chr(92) + "r" }
+                adapt mutate (c == chr(9)) { out = out + chr(92) + "t" }
+                adapt mutate (code < 32) {
+                    out = out + chr(92) + "u" + pad4(code)
+                }
+                adapt { out = out + c }
+        }
+        return out
+    }
+
+    // Four lowercase hex digits, right-aligned. Written by hand because there is
+    // no printf in BioLang and the C# side uses x4.
+    // Four lowercase hex digits. There is no modulo operator in BioLang, and a
+    // JSON unicode escape is only ever written for a control character (< 32),
+    // so one digit of sixteens and one of units covers every value it sees.
+    organ pad4(dna n) -> rna {
+        cell rna digits = "0123456789abcdef"
+        cell dna v = n
+        cell dna sixteens = 0
+        replicate (v >= 16) { v = v - 16  sixteens = sixteens + 1 }
+        return "00" + digits[sixteens] + digits[v]
+    }
+
+    organ Q(rna s) -> rna { return chr(34) + esc(s) + chr(34) }
+
+    // A number, written the way the C# side writes it: whole numbers without a
+    // trailing .0, everything else as short as it can be written.
+    // BioLang's own number formatting already writes a whole number without a
+    // trailing .0, which is what the C# side does, so this is a pass-through.
+    //
+    // Known limit: C# uses the shortest round-trip form, BioLang twelve decimal
+    // places. They agree on every literal these test files contain and can
+    // differ on a value that came out of repeated float arithmetic.
+    organ num(dna v) -> rna {
+        return rna(v)
+    }
+
+    organ tokJson(Tok t) -> rna {
+        return "{" + Q("line") + ":" + rna(t.line) + "," + Q("col") + ":" + rna(t.col) + "}"
+    }
+
+    organ typeJson(rna kind, rna name) -> rna {
+        mutate (name == "") {
+            return "{" + Q("kind") + ":" + Q(kind) + "," + Q("name") + ":null}"
+        }
+        return "{" + Q("kind") + ":" + Q(kind) + "," + Q("name") + ":" + Q(name) + "}"
+    }
+
+    organ field(rna label, rna value) -> rna {
+        return Q(label) + ":" + value
+    }
+
+    // Joins a colony of already-serialized fragments, comma separated.
+    organ joinArr(colony parts) -> rna {
+        cell rna out = "["
+        traverse (cell dna i = 0; i < parts.length; i = i + 1) {
+            mutate (i > 0) { out = out + "," }
+            out = out + parts[i]
+        }
+        return out + "]"
+    }
+
+    // ------------------------------------------------------------ predicates
+
+    organ isType(Tok t) -> enzyme {
+        cell rna k = t.kind
+        mutate (k == "Rna") { return active } adapt { }
+        mutate (k == "Dna") { return active } adapt { }
+        mutate (k == "Enzyme") { return active } adapt { }
+        mutate (k == "Colony") { return active } adapt { }
+        mutate (k == "Organ") { return active } adapt { }
+        mutate (k == "Void") { return active } adapt { }
+        // An identifier in a type position is a membrane or trait name; the
+        // parser does not resolve which, the interpreter does.
+        mutate (k == "Identifier") { return active } adapt { }
+        return dormant
+    }
+
+    organ kindOfType(rna k) -> rna {
+        mutate (k == "Rna") { return "Rna" } adapt { }
+        mutate (k == "Dna") { return "Dna" } adapt { }
+        mutate (k == "Enzyme") { return "Enzyme" } adapt { }
+        mutate (k == "Colony") { return "Colony" } adapt { }
+        mutate (k == "Organ") { return "Organ" } adapt { }
+        mutate (k == "Void") { return "Void" } adapt { }
+        return "Membrane"
+    }
+
+    // ------------------------------------------------------------- fragments
+    // The "match" form below repeated everywhere is BioLang's if/else-if chain:
+    //   mutate (cond) { } adapt mutate (cond) { } adapt { }
+    // It reads oddly at first and is the whole reason this file is short.
+
+    // ------------------------------------------------------------- types
+
+    organ parseType(P p) -> rna {
+        cell Tok t = cur(p)
+        mutate (isType(t) == dormant) {
+            return fail("expected a type, found " + t.text, "")
+        }
+        p.pos = p.pos + 1
+        mutate (t.kind == "Identifier") {
+            return typeJson("Membrane", t.text)
+        }
+        return typeJson(kindOfType(t.kind), "")
+    }
+
+    // ------------------------------------------------------------- blocks
+
+    organ parseBlock(P p) -> rna {
+        mutate (cur(p).kind != "LBrace") {
+            return fail("expected {, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+        cell colony body = []
+        replicate (cur(p).kind != "RBrace") {
+            mutate (cur(p).kind == "EOF") { sever }
+            body.inject(parseStatement(p))
+        }
+        mutate (cur(p).kind != "RBrace") {
+            return fail("expected }, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+        return "{" + Q("type") + ":" + Q("Block") + "," + Q("body") + ":" + joinArr(body) + "}"
+    }
+
+    // --------------------------------------------------------- expressions
+    // Precedence, loosest first:
+    //   comparison > term > factor > unary > postfix > primary
+
+    organ parseExpr(P p) -> rna { return parseComparison(p) }
+
+    organ cmpOp(rna k) -> enzyme {
+        mutate (k == "Lt") { return active } adapt { }
+        mutate (k == "Gt") { return active } adapt { }
+        mutate (k == "Le") { return active } adapt { }
+        mutate (k == "Ge") { return active } adapt { }
+        mutate (k == "EqEq") { return active } adapt { }
+        mutate (k == "NotEq") { return active } adapt { }
+        return dormant
+    }
+
+    organ opText(rna k) -> rna {
+        mutate (k == "Lt") { return "<" } adapt { }
+        mutate (k == "Gt") { return ">" } adapt { }
+        mutate (k == "Le") { return "<=" } adapt { }
+        mutate (k == "Ge") { return ">=" } adapt { }
+        mutate (k == "EqEq") { return "==" } adapt { }
+        mutate (k == "NotEq") { return "!=" } adapt { }
+        mutate (k == "Plus") { return "+" } adapt { }
+        mutate (k == "Minus") { return "-" } adapt { }
+        mutate (k == "Star") { return "*" } adapt { }
+        mutate (k == "Slash") { return "/" } adapt { }
+        return "?"
+    }
+
+    organ parseComparison(P p) -> rna {
+        cell rna left = parseTerm(p)
+        replicate (cmpOp(cur(p).kind)) {
+            cell Tok op = cur(p)
+            p.pos = p.pos + 1
+            cell rna right = parseTerm(p)
+            left = "{" + Q("type") + ":" + Q("Binary") + ","
+                + field("op", Q(opText(op.kind))) + ","
+                + field("left", left) + ","
+                + field("right", right) + ","
+                + field("tok", tokJson(op)) + "}"
+        }
+        return left
+    }
+
+    organ parseTerm(P p) -> rna {
+        cell rna left = parseFactor(p)
+        replicate (kindIs2(cur(p).kind, "Plus", "Minus")) {
+            cell Tok op = cur(p)
+            p.pos = p.pos + 1
+            cell rna right = parseFactor(p)
+            left = "{" + Q("type") + ":" + Q("Binary") + ","
+                + field("op", Q(opText(op.kind))) + ","
+                + field("left", left) + ","
+                + field("right", right) + ","
+                + field("tok", tokJson(op)) + "}"
+        }
+        return left
+    }
+
+    organ parseFactor(P p) -> rna {
+        cell rna left = parseUnary(p)
+        replicate (kindIs2(cur(p).kind, "Star", "Slash")) {
+            cell Tok op = cur(p)
+            p.pos = p.pos + 1
+            cell rna right = parseUnary(p)
+            left = "{" + Q("type") + ":" + Q("Binary") + ","
+                + field("op", Q(opText(op.kind))) + ","
+                + field("left", left) + ","
+                + field("right", right) + ","
+                + field("tok", tokJson(op)) + "}"
+        }
+        return left
+    }
+
+    organ parseUnary(P p) -> rna {
+        mutate (kindIs2(cur(p).kind, "Minus", "Plus")) {
+            cell Tok op = cur(p)
+            p.pos = p.pos + 1
+            cell rna inner = parseUnary(p)
+            return "{" + Q("type") + ":" + Q("Unary") + ","
+                + field("op", Q(opText(op.kind))) + ","
+                + field("expr", inner) + ","
+                + field("tok", tokJson(op)) + "}"
+        }
+        return parsePostfix(p)
+    }
+
+    organ isTypeTok(Tok t) -> enzyme {
+        mutate (t.kind == "Rna") { return active } adapt { }
+        mutate (t.kind == "Dna") { return active } adapt { }
+        mutate (t.kind == "Enzyme") { return active } adapt { }
+        mutate (t.kind == "Colony") { return active } adapt { }
+        mutate (t.kind == "Organ") { return active } adapt { }
+        mutate (t.kind == "Void") { return active } adapt { }
+        return dormant
+    }
+
+    organ parseArgs(P p) -> colony {
+        cell colony args = []
+        mutate (cur(p).kind == "LParen") {
+            p.pos = p.pos + 1
+            mutate (cur(p).kind != "RParen") {
+                cell enzyme more = active
+                replicate (more) {
+                    args.inject(parseExpr(p))
+                    mutate (cur(p).kind == "Comma") { p.pos = p.pos + 1 }
+                        adapt { more = dormant }
+                }
+            }
+            mutate (cur(p).kind != "RParen") {
+                return [fail("expected ), found ", cur(p).text)]
+            }
+            p.pos = p.pos + 1
+        }
+        return args
+    }
+
+    organ parseParamList(P p) -> colony {
+        cell colony ps = []
+        mutate (cur(p).kind == "LParen") {
+            p.pos = p.pos + 1
+            mutate (cur(p).kind != "RParen") {
+                cell enzyme more = active
+                replicate (more) {
+                    cell rna ptype = parseType(p)
+                    mutate (cur(p).kind != "Identifier") {
+                        return [fail("expected a parameter name, found ", cur(p).text)]
+                    }
+                    cell Tok nameTok = cur(p)
+                    p.pos = p.pos + 1
+                    ps.inject("{" + Q("type") + ":" + Q("Param") + ","
+                        + field("name", Q(nameTok.text)) + ","
+                        + field("paramType", ptype) + ","
+                        + field("tok", tokJson(nameTok)) + "}")
+                    mutate (cur(p).kind == "Comma") { p.pos = p.pos + 1 }
+                        adapt { more = dormant }
+                }
+            }
+            mutate (cur(p).kind != "RParen") {
+                return [fail("expected ), found ", cur(p).text)]
+            }
+            p.pos = p.pos + 1
+        }
+        return ps
+    }
+
+    organ parsePostfix(P p) -> rna {
+        cell rna e = parsePrimary(p)
+        cell enzyme more = active
+        replicate (more) {
+            mutate (cur(p).kind == "Dot") {
+                cell Tok dot = cur(p)
+                p.pos = p.pos + 1
+                mutate (cur(p).kind != "Identifier") {
+                    return fail("expected a member name, found ", cur(p).text)
+                }
+                cell Tok nameTok = cur(p)
+                p.pos = p.pos + 1
+                mutate (cur(p).kind == "LParen") {
+                    cell colony args = parseArgs(p)
+                    e = "{" + Q("type") + ":" + Q("MethodCall") + ","
+                        + field("target", e) + ","
+                        + field("name", Q(nameTok.text)) + ","
+                        + field("args", joinArr(args)) + ","
+                        + field("tok", tokJson(dot)) + "}"
+                } adapt {
+                    e = "{" + Q("type") + ":" + Q("Member") + ","
+                        + field("target", e) + ","
+                        + field("name", Q(nameTok.text)) + ","
+                        + field("tok", tokJson(dot)) + "}"
+                }
+            } adapt mutate (cur(p).kind == "LBracket") {
+                cell Tok br = cur(p)
+                p.pos = p.pos + 1
+                cell rna key = parseExpr(p)
+                mutate (cur(p).kind != "RBracket") {
+                    return fail("expected ], found ", cur(p).text)
+                }
+                p.pos = p.pos + 1
+                e = "{" + Q("type") + ":" + Q("Index") + ","
+                    + field("target", e) + ","
+                    + field("key", key) + ","
+                    + field("tok", tokJson(br)) + "}"
+            } adapt mutate (isInvoke(p, e)) {
+                // Calling whatever the expression produced. A bare name
+                // followed by ( is a Call, handled in parsePrimary, so this only
+                // fires for a callee that is not a plain identifier.
+                cell Tok pt = cur(p)
+                cell colony args = parseArgs(p)
+                e = "{" + Q("type") + ":" + Q("Invoke") + ","
+                    + field("callee", e) + ","
+                    + field("args", joinArr(args)) + ","
+                    + field("tok", tokJson(pt)) + "}"
+            } adapt {
+                more = dormant
+            }
+        }
+        return e
+    }
+
+    // True when the fragment is NOT a plain Ident - i.e. it was already wrapped
+    // by a postfix operator, so a following ( means "call the result".
+    organ startsNotIdent(rna frag) -> enzyme {
+        mutate (frag.length < 30) { return dormant }
+        cell rna head = frag.slice(0, 22)
+        cell rna identHead = "{" + chr(34) + "type" + chr(34) + ":" + chr(34) + "Ident" + chr(34)
+        mutate (head == identHead) { return dormant }
+        return active
+    }
+
+    organ parsePrimary(P p) -> rna {
+        cell Tok t = cur(p)
+
+        mutate (t.kind == "Number") {
+            p.pos = p.pos + 1
+            return "{" + Q("type") + ":" + Q("NumLit") + "," + field("value", num(dna(t.text))) + "}"
+        } adapt mutate (t.kind == "String") {
+            p.pos = p.pos + 1
+            return "{" + Q("type") + ":" + Q("StrLit") + "," + field("value", Q(t.text)) + "}"
+        } adapt mutate (t.kind == "Active") {
+            p.pos = p.pos + 1
+            return "{" + Q("type") + ":" + Q("BoolLit") + "," + field("value", "true") + "}"
+        } adapt mutate (t.kind == "Dormant") {
+            p.pos = p.pos + 1
+            return "{" + Q("type") + ":" + Q("BoolLit") + "," + field("value", "false") + "}"
+        } adapt mutate (t.kind == "LBracket") {
+            p.pos = p.pos + 1
+            cell colony items = []
+            mutate (cur(p).kind != "RBracket") {
+                cell enzyme more = active
+                replicate (more) {
+                    items.inject(parseExpr(p))
+                    mutate (cur(p).kind == "Comma") { p.pos = p.pos + 1 }
+                        adapt { more = dormant }
+                }
+            }
+            mutate (cur(p).kind != "RBracket") {
+                return fail("expected ], found ", cur(p).text)
+            }
+            p.pos = p.pos + 1
+            return "{" + Q("type") + ":" + Q("ArrayLit") + "," + field("items", joinArr(items)) + "}"
+        } adapt mutate (t.kind == "LParen") {
+            p.pos = p.pos + 1
+            cell rna e = parseExpr(p)
+            mutate (cur(p).kind != "RParen") {
+                return fail("expected ), found ", cur(p).text)
+            }
+            p.pos = p.pos + 1
+            return e
+        } adapt mutate (t.kind == "Spore") {
+            return parseLambda(p)
+        } adapt mutate (t.kind == "Identifier") {
+            p.pos = p.pos + 1
+            mutate (cur(p).kind == "LParen") {
+                cell colony args = parseArgs(p)
+                return "{" + Q("type") + ":" + Q("Call") + ","
+                    + field("name", Q(t.text)) + ","
+                    + field("args", joinArr(args)) + ","
+                    + field("tok", tokJson(t)) + "}"
+            } adapt mutate (cur(p).kind == "LBrace") {
+                return parseStructLit(p, t)
+            }
+            return "{" + Q("type") + ":" + Q("Ident") + ","
+                + field("name", Q(t.text)) + ","
+                + field("tok", tokJson(t)) + "}"
+        } adapt mutate (kindIs3(t.kind, "Absorb", "Rna", "Dna")) {
+            // Builtins spelled with reserved words. They lex as keywords rather
+            // than identifiers, so the expression parser has to accept them
+            // explicitly or they are unusable as calls.
+            mutate (ahead(p, 1).kind != "LParen") {
+                return fail("a type or builtin used as a value: ", t.text)
+            }
+            p.pos = p.pos + 1
+            cell colony args = parseArgs(p)
+            return "{" + Q("type") + ":" + Q("Call") + ","
+                + field("name", Q(t.text)) + ","
+                + field("args", joinArr(args)) + ","
+                + field("tok", tokJson(t)) + "}"
+        }
+
+        return fail("expected an expression, found ", t.text)
+    }
+
+    organ parseLambda(P p) -> rna {
+        cell Tok sp = cur(p)
+        p.pos = p.pos + 1
+        cell colony ps = parseParamList(p)
+        mutate (cur(p).kind != "Arrow") {
+            return fail("expected ->, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+        cell rna ret = parseType(p)
+        cell rna body = parseBlock(p)
+        return "{" + Q("type") + ":" + Q("LambdaLit") + ","
+            + field("returnType", ret) + ","
+            + field("params", joinArr(ps)) + ","
+            + field("body", body) + ","
+            + field("tok", tokJson(sp)) + "}"
+    }
+
+    organ parseStructLit(P p, Tok nameTok) -> rna {
+        mutate (cur(p).kind != "LBrace") {
+            return fail("expected {, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+        cell colony fs = []
+        mutate (cur(p).kind != "RBrace") {
+            cell enzyme more = active
+            replicate (more) {
+                mutate (cur(p).kind == "Comma") { p.pos = p.pos + 1 }
+                mutate (cur(p).kind == "RBrace") { more = dormant } adapt {
+                    mutate (cur(p).kind != "Identifier") {
+                        return fail("expected a field name, found ", cur(p).text)
+                    }
+                    cell Tok ft = cur(p)
+                    p.pos = p.pos + 1
+                    mutate (cur(p).kind != "Assign") {
+                        return fail("expected =, found ", cur(p).text)
+                    }
+                    p.pos = p.pos + 1
+                    cell rna val = parseExpr(p)
+                    fs.inject("{" + Q("field") + ":" + Q(ft.text) + ","
+                        + field("value", val) + "}")
+                }
+            }
+        }
+        mutate (cur(p).kind != "RBrace") {
+            return fail("expected }, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+        return "{" + Q("type") + ":" + Q("StructLit") + ","
+            + field("name", Q(nameTok.text)) + ","
+            + field("fields", joinArr(fs)) + ","
+            + field("tok", tokJson(nameTok)) + "}"
+    }
+
+    // ---------------------------------------------------------- declarations
+
+    organ parseFunction(P p) -> rna {
+        cell Tok ft = cur(p)
+        p.pos = p.pos + 1
+        mutate (cur(p).kind != "Identifier") {
+            return fail("expected a function name, found ", cur(p).text)
+        }
+        cell Tok nameTok = cur(p)
+        p.pos = p.pos + 1
+        cell colony ps = parseParamList(p)
+        mutate (cur(p).kind != "Arrow") {
+            return fail("expected ->, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+        cell rna ret = parseType(p)
+        cell rna body = parseBlock(p)
+        return "{" + Q("type") + ":" + Q("FunctionDecl") + ","
+            + field("name", Q(nameTok.text)) + ","
+            + field("returnType", ret) + ","
+            + field("params", joinArr(ps)) + ","
+            + field("body", body) + ","
+            + field("tok", tokJson(ft)) + "}"
+    }
+
+    organ parseTrait(P p) -> rna {
+        cell Tok tt = cur(p)
+        p.pos = p.pos + 1
+        mutate (cur(p).kind != "Identifier") {
+            return fail("expected a trait name, found ", cur(p).text)
+        }
+        cell Tok nameTok = cur(p)
+        p.pos = p.pos + 1
+        mutate (cur(p).kind != "LBrace") {
+            return fail("expected {, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+        cell colony sigs = []
+        replicate (cur(p).kind != "RBrace") {
+            mutate (cur(p).kind == "EOF") { sever }
+            mutate (cur(p).kind != "Organ") {
+                return fail("a trait may only declare organs, found ", cur(p).text)
+            }
+            cell Tok ft = cur(p)
+            p.pos = p.pos + 1
+            mutate (cur(p).kind != "Identifier") {
+                return fail("expected a method name, found ", cur(p).text)
+            }
+            cell Tok mTok = cur(p)
+            p.pos = p.pos + 1
+            cell colony ps = parseParamList(p)
+            mutate (cur(p).kind != "Arrow") {
+                return fail("expected ->, found ", cur(p).text)
+            }
+            p.pos = p.pos + 1
+            cell rna ret = parseType(p)
+            // A signature has no body. An empty Block stands in so the shape
+            // matches FunctionDecl rather than needing a parallel record.
+            sigs.inject("{" + Q("type") + ":" + Q("FunctionDecl") + ","
+                + field("name", Q(mTok.text)) + ","
+                + field("returnType", ret) + ","
+                + field("params", joinArr(ps)) + ","
+                + field("body", "{" + Q("type") + ":" + Q("Block") + "," + Q("body") + ":[]}") + ","
+                + field("tok", tokJson(ft)) + "}")
+        }
+        mutate (cur(p).kind != "RBrace") {
+            return fail("expected }, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+        return "{" + Q("type") + ":" + Q("TraitDecl") + ","
+            + field("name", Q(nameTok.text)) + ","
+            + field("signatures", joinArr(sigs)) + ","
+            + field("tok", tokJson(tt)) + "}"
+    }
+
+    organ parseMembrane(P p) -> rna {
+        cell Tok mt = cur(p)
+        p.pos = p.pos + 1
+        mutate (cur(p).kind != "Identifier") {
+            return fail("expected a membrane name, found ", cur(p).text)
+        }
+        cell Tok nameTok = cur(p)
+        p.pos = p.pos + 1
+
+        cell colony promises = []
+        mutate (cur(p).kind == "Witnesses") {
+            p.pos = p.pos + 1
+            cell enzyme more = active
+            replicate (more) {
+                mutate (cur(p).kind != "Identifier") {
+                    return fail("expected a trait name, found ", cur(p).text)
+                }
+                cell Tok tt = cur(p)
+                p.pos = p.pos + 1
+                promises.inject("{" + Q("trait") + ":" + Q(tt.text) + ","
+                    + field("tok", tokJson(tt)) + "}")
+                mutate (cur(p).kind == "Comma") { p.pos = p.pos + 1 }
+                    adapt { more = dormant }
+            }
+        }
+
+        mutate (cur(p).kind != "LBrace") {
+            return fail("expected {, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+
+        cell colony fields = []
+        cell colony methods = []
+        replicate (cur(p).kind != "RBrace") {
+            mutate (cur(p).kind == "EOF") { sever }
+            mutate (cur(p).kind == "Comma") { p.pos = p.pos + 1 }
+            mutate (cur(p).kind == "Organ") {
+                methods.inject(parseFunction(p))
+            } adapt {
+                mutate (cur(p).kind == "RBrace") { sever }
+                cell rna ftype = parseType(p)
+                mutate (cur(p).kind != "Identifier") {
+                    return fail("expected a field name, found ", cur(p).text)
+                }
+                cell Tok fieldTok = cur(p)
+                p.pos = p.pos + 1
+                fields.inject("{" + Q("type") + ":" + Q("FieldDecl") + ","
+                    + field("name", Q(fieldTok.text)) + ","
+                    + field("fieldType", ftype) + ","
+                    + field("tok", tokJson(fieldTok)) + "}")
+            }
+        }
+        mutate (cur(p).kind != "RBrace") {
+            return fail("expected }, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+
+        return "{" + Q("type") + ":" + Q("MembraneDecl") + ","
+            + field("name", Q(nameTok.text)) + ","
+            + field("fields", joinArr(fields)) + ","
+            + field("methods", joinArr(methods)) + ","
+            + field("traits", joinArr(promises)) + ","
+            + field("tok", tokJson(mt)) + "}"
+    }
+
+    organ parseMain(P p) -> rna {
+        cell Tok mt = cur(p)
+        p.pos = p.pos + 1
+        mutate (cur(p).kind != "LParen") {
+            return fail("expected (, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+        mutate (cur(p).kind != "RParen") {
+            return fail("expected ), found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+        cell rna body = parseBlock(p)
+        return "{" + Q("type") + ":" + Q("MainDecl") + ","
+            + field("body", body) + ","
+            + field("tok", tokJson(mt)) + "}"
+    }
+
+    // ------------------------------------------------------------ statements
+
+
+    // ------------------------------------------------- compound tests
+    // BioLang has no and/or operators, so every compound condition in this
+    // file goes through a named helper. It reads better at the call site
+    // anyway: isBareDecl(p) says more than three chained comparisons.
+
+    organ kindIs2(rna k, rna a, rna b) -> enzyme {
+        mutate (k == a) { return active } adapt { }
+        mutate (k == b) { return active } adapt { }
+        return dormant
+    }
+
+    organ kindIs3(rna k, rna a, rna b, rna c) -> enzyme {
+        mutate (kindIs2(k, a, b)) { return active } adapt { }
+        mutate (k == c) { return active } adapt { }
+        return dormant
+    }
+
+    // Calls whatever the expression produced. A bare name followed by ( is
+    // parsed as a Call in parsePrimary, so this only fires for a callee that
+    // is not a plain identifier.
+    organ isInvoke(P p, rna e) -> enzyme {
+        mutate (cur(p).kind != "LParen") { return dormant }
+        return startsNotIdent(e)
+    }
+
+    // `name = ...`
+    organ isAssignStart(P p) -> enzyme {
+        mutate (cur(p).kind != "Identifier") { return dormant }
+        mutate (ahead(p, 1).kind == "Assign") { return active }
+        return dormant
+    }
+
+    // `Point p = ...` with a bare type, no cell/fossil keyword.
+    organ isBareDecl(P p) -> enzyme {
+        mutate (isTypeTok(cur(p)) == dormant) { return dormant }
+        mutate (ahead(p, 1).kind == "Identifier") { return active }
+        return dormant
+    }
+
+    // `Point p = ...` where the type is a membrane name rather than a builtin.
+    organ isBareDeclFull(P p) -> enzyme {
+        mutate (isTypeTok(cur(p)) == dormant) { return dormant }
+        mutate (ahead(p, 1).kind != "Identifier") { return dormant }
+        mutate (ahead(p, 2).kind == "Assign") { return active }
+        return dormant
+    }
+
+    // `p.x = ...`
+    organ isFieldAssignStart(P p) -> enzyme {
+        mutate (cur(p).kind != "Identifier") { return dormant }
+        mutate (ahead(p, 1).kind != "Dot") { return dormant }
+        mutate (ahead(p, 2).kind != "Identifier") { return dormant }
+        mutate (ahead(p, 3).kind == "Assign") { return active }
+        return dormant
+    }
+
+    // A type token in the leading position, with a name and = after it.
+    organ isTypedDeclStart(P p, Tok t) -> enzyme {
+        mutate (isTypeTok(t) == dormant) { return dormant }
+        mutate (ahead(p, 1).kind != "Identifier") { return dormant }
+        mutate (ahead(p, 2).kind == "Assign") { return active }
+        return dormant
+    }
+    organ parseSimpleStatement(P p) -> rna {
+        // A declaration or an assignment - what a for-loop header may contain.
+        // Parsed inline rather than through parseVarDecl, because that variant
+        // consumes a trailing semicolon as a statement terminator and would eat
+        // the separator the loop header still needs.
+        mutate (kindIs2(cur(p).kind, "Cell", "Fossil")) {
+            cell Tok dt = cur(p)
+            p.pos = p.pos + 1
+            cell enzyme mut = dormant
+            mutate (dt.kind == "Cell") { mut = active }
+            cell rna dtype = parseType(p)
+            mutate (cur(p).kind != "Identifier") {
+                return fail("expected a variable name, found ", cur(p).text)
+            }
+            cell Tok nameTok = cur(p)
+            p.pos = p.pos + 1
+            mutate (cur(p).kind != "Assign") {
+                return fail("expected =, found ", cur(p).text)
+            }
+            p.pos = p.pos + 1
+            cell rna init = parseExpr(p)
+            cell rna m = "false"
+            mutate (mut) { m = "true" }
+            return "{" + Q("type") + ":" + Q("VarDecl") + ","
+                + field("mutable", m) + ","
+                + field("declType", dtype) + ","
+                + field("name", Q(nameTok.text)) + ","
+                + field("init", init) + ","
+                + field("tok", tokJson(dt)) + "}"
+        } adapt mutate (isAssignStart(p)) {
+            cell Tok nameTok = cur(p)
+            p.pos = p.pos + 1
+            p.pos = p.pos + 1
+            cell rna val = parseExpr(p)
+            return "{" + Q("type") + ":" + Q("Assign") + ","
+                + field("name", Q(nameTok.text)) + ","
+                + field("value", val) + ","
+                + field("tok", tokJson(nameTok)) + "}"
+        } adapt mutate (isBareDecl(p)) {
+            cell Tok dt = cur(p)
+            cell rna dtype = parseType(p)
+            mutate (cur(p).kind != "Identifier") {
+                return fail("expected a variable name, found ", cur(p).text)
+            }
+            cell Tok nameTok = cur(p)
+            p.pos = p.pos + 1
+            mutate (cur(p).kind != "Assign") {
+                return fail("expected =, found ", cur(p).text)
+            }
+            p.pos = p.pos + 1
+            cell rna init = parseExpr(p)
+            return "{" + Q("type") + ":" + Q("VarDecl") + ","
+                + field("mutable", "true") + ","
+                + field("declType", dtype) + ","
+                + field("name", Q(nameTok.text)) + ","
+                + field("init", init) + ","
+                + field("tok", tokJson(dt)) + "}"
+        }
+
+        return fail("expected a declaration or an assignment, found ", cur(p).text)
+    }
+
+    organ parseStatement(P p) -> rna {
+        cell Tok t = cur(p)
+
+        mutate (kindIs2(t.kind, "Cell", "Fossil")) {
+            return parseVarDecl(p)
+        } adapt mutate (t.kind == "Mutate") {
+            return parseIf(p)
+        } adapt mutate (t.kind == "Replicate") {
+            return parseWhile(p)
+        } adapt mutate (t.kind == "Traverse") {
+            return parseFor(p)
+        } adapt mutate (t.kind == "Sever") {
+            p.pos = p.pos + 1
+            mutate (cur(p).kind == "Semicolon") { p.pos = p.pos + 1 }
+            return "{" + Q("type") + ":" + Q("BreakStmt") + ","
+                + field("tok", tokJson(t)) + "}"
+        } adapt mutate (t.kind == "Skip") {
+            p.pos = p.pos + 1
+            mutate (cur(p).kind == "Semicolon") { p.pos = p.pos + 1 }
+            return "{" + Q("type") + ":" + Q("ContinueStmt") + ","
+                + field("tok", tokJson(t)) + "}"
+        } adapt mutate (t.kind == "Graft") {
+            p.pos = p.pos + 1
+            mutate (cur(p).kind != "String") {
+                return fail("expected a file path in quotes, found ", cur(p).text)
+            }
+            cell Tok pathTok = cur(p)
+            p.pos = p.pos + 1
+            mutate (cur(p).kind == "Semicolon") { p.pos = p.pos + 1 }
+            return "{" + Q("type") + ":" + Q("GraftStmt") + ","
+                + field("path", Q(pathTok.text)) + ","
+                + field("tok", tokJson(t)) + "}"
+        } adapt mutate (t.kind == "Secrete") {
+            p.pos = p.pos + 1
+            mutate (cur(p).kind != "LParen") {
+                return fail("expected (, found ", cur(p).text)
+            }
+            p.pos = p.pos + 1
+            cell rna e = parseExpr(p)
+            mutate (cur(p).kind != "RParen") {
+                return fail("expected ), found ", cur(p).text)
+            }
+            p.pos = p.pos + 1
+            mutate (cur(p).kind == "Semicolon") { p.pos = p.pos + 1 }
+            return "{" + Q("type") + ":" + Q("PrintStmt") + ","
+                + field("value", e) + ","
+                + field("tok", tokJson(t)) + "}"
+        } adapt mutate (t.kind == "Return") {
+            p.pos = p.pos + 1
+            cell rna e = parseExpr(p)
+            mutate (cur(p).kind == "Semicolon") { p.pos = p.pos + 1 }
+            return "{" + Q("type") + ":" + Q("ReturnStmt") + ","
+                + field("value", e) + ","
+                + field("tok", tokJson(t)) + "}"
+        } adapt mutate (isFieldAssignStart(p)) {
+            // p.x = 5
+            cell Tok base = cur(p)
+            p.pos = p.pos + 1
+            p.pos = p.pos + 1
+            cell Tok fieldTok = cur(p)
+            p.pos = p.pos + 1
+            p.pos = p.pos + 1
+            cell rna val = parseExpr(p)
+            mutate (cur(p).kind == "Semicolon") { p.pos = p.pos + 1 }
+            return "{" + Q("type") + ":" + Q("FieldAssign") + ","
+                + field("target", "{" + Q("type") + ":" + Q("Ident") + ","
+                    + field("name", Q(base.text)) + ","
+                    + field("tok", tokJson(base)) + "}") + ","
+                + field("field", Q(fieldTok.text)) + ","
+                + field("value", val) + ","
+                + field("tok", tokJson(fieldTok)) + "}"
+        } adapt mutate (isAssignStart(p)) {
+            cell Tok nameTok = cur(p)
+            p.pos = p.pos + 1
+            p.pos = p.pos + 1
+            cell rna val = parseExpr(p)
+            mutate (cur(p).kind == "Semicolon") { p.pos = p.pos + 1 }
+            return "{" + Q("type") + ":" + Q("Assign") + ","
+                + field("name", Q(nameTok.text)) + ","
+                + field("value", val) + ","
+                + field("tok", tokJson(nameTok)) + "}"
+        } adapt mutate (isTypedDeclStart(p, t)) {
+            return parseBareVarDecl(p)
+        }
+
+        // A bare expression statement.
+        cell rna e = parseExpr(p)
+        mutate (cur(p).kind == "Semicolon") { p.pos = p.pos + 1 }
+        return "{" + Q("type") + ":" + Q("ExprStmt") + "," + field("value", e) + "}"
+    }
+
+    // A bare typed declaration: `dna x = 1`, with no cell/fossil keyword.
+    //
+    // The published grammar does not allow this - VarDeclaration requires
+    // one of those two words - but the spec's own example uses it, so
+    // rejecting it would mean the language cannot run the program it ships
+    // with. Treated as mutable, exactly as the C# parser does.
+    //
+    // It needs its own function rather than reusing parseVarDecl: that one
+    // skips one token assuming it is the keyword, which for a bare `dna x`
+    // eats the type and leaves `x` being read as the type.
+    organ parseBareVarDecl(P p) -> rna {
+        cell Tok dt = cur(p)
+        cell rna dtype = parseType(p)
+        mutate (cur(p).kind != "Identifier") {
+            return fail("expected a variable name, found ", cur(p).text)
+        }
+        cell Tok nameTok = cur(p)
+        p.pos = p.pos + 1
+        mutate (cur(p).kind != "Assign") {
+            return fail("expected =, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+        cell rna init = parseExpr(p)
+        mutate (cur(p).kind == "Semicolon") { p.pos = p.pos + 1 }
+        return "{" + Q("type") + ":" + Q("VarDecl") + ","
+            + field("mutable", "true") + ","
+            + field("declType", dtype) + ","
+            + field("name", Q(nameTok.text)) + ","
+            + field("init", init) + ","
+            + field("tok", tokJson(dt)) + "}"
+    }
+    organ parseVarDecl(P p) -> rna {
+        cell Tok dt = cur(p)
+        p.pos = p.pos + 1
+        cell enzyme mut = dormant
+        mutate (dt.kind == "Cell") { mut = active }
+        cell rna dtype = parseType(p)
+        mutate (cur(p).kind != "Identifier") {
+            return fail("expected a variable name, found ", cur(p).text)
+        }
+        cell Tok nameTok = cur(p)
+        p.pos = p.pos + 1
+        mutate (cur(p).kind != "Assign") {
+            return fail("expected =, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+        cell rna init = parseExpr(p)
+        mutate (cur(p).kind == "Semicolon") { p.pos = p.pos + 1 }
+        cell rna m = "false"
+        mutate (mut) { m = "true" }
+        return "{" + Q("type") + ":" + Q("VarDecl") + ","
+            + field("mutable", m) + ","
+            + field("declType", dtype) + ","
+            + field("name", Q(nameTok.text)) + ","
+            + field("init", init) + ","
+            + field("tok", tokJson(dt)) + "}"
+    }
+
+    organ parseIf(P p) -> rna {
+        p.pos = p.pos + 1
+        mutate (cur(p).kind != "LParen") {
+            return fail("expected (, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+        cell rna cond = parseExpr(p)
+        mutate (cur(p).kind != "RParen") {
+            return fail("expected ), found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+        cell rna thenB = parseBlock(p)
+
+        cell rna elseB = "null"
+        mutate (cur(p).kind == "Adapt") {
+            p.pos = p.pos + 1
+            mutate (cur(p).kind == "Mutate") {
+                // adapt mutate (...) is the else-if chain. The nested IfStmt is
+                // wrapped in a one-statement block so the Else stays a Block and
+                // nothing downstream has to know about a second shape.
+                elseB = "{" + Q("type") + ":" + Q("Block") + ","
+                    + Q("body") + ":[" + parseIf(p) + "]}"
+            } adapt {
+                elseB = parseBlock(p)
+            }
+        }
+        return "{" + Q("type") + ":" + Q("IfStmt") + ","
+            + field("cond", cond) + ","
+            + field("then", thenB) + ","
+            + field("else", elseB) + "}"
+    }
+
+    organ parseWhile(P p) -> rna {
+        cell Tok wt = cur(p)
+        p.pos = p.pos + 1
+        mutate (cur(p).kind != "LParen") {
+            return fail("expected (, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+        cell rna cond = parseExpr(p)
+        mutate (cur(p).kind != "RParen") {
+            return fail("expected ), found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+        cell rna body = parseBlock(p)
+        return "{" + Q("type") + ":" + Q("WhileStmt") + ","
+            + field("cond", cond) + ","
+            + field("body", body) + ","
+            + field("tok", tokJson(wt)) + "}"
+    }
+
+    organ parseFor(P p) -> rna {
+        cell Tok ft = cur(p)
+        p.pos = p.pos + 1
+        mutate (cur(p).kind != "LParen") {
+            return fail("expected (, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+
+        cell rna initJ = "null"
+        mutate (cur(p).kind != "Semicolon") {
+            initJ = parseSimpleStatement(p)
+        }
+        mutate (cur(p).kind != "Semicolon") {
+            return fail("expected ; after the loop initialiser, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+
+        cell rna condJ = "null"
+        mutate (cur(p).kind != "Semicolon") {
+            condJ = parseExpr(p)
+        }
+        mutate (cur(p).kind != "Semicolon") {
+            return fail("expected ; after the loop condition, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+
+        cell rna stepJ = "null"
+        mutate (cur(p).kind != "RParen") {
+            stepJ = parseSimpleStatement(p)
+        }
+        mutate (cur(p).kind != "RParen") {
+            return fail("expected ) after the loop step, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+
+        cell rna body = parseBlock(p)
+        return "{" + Q("type") + ":" + Q("ForStmt") + ","
+            + field("init", initJ) + ","
+            + field("cond", condJ) + ","
+            + field("step", stepJ) + ","
+            + field("body", body) + ","
+            + field("tok", tokJson(ft)) + "}"
+    }
+
+    // ----------------------------------------------------------------- entry
+
+    organ parseProgram(P p) -> rna {
+        mutate (cur(p).kind != "Organism") {
+            return fail("expected organism, found ", cur(p).text)
+        }
+        cell Tok orgTok = cur(p)
+        p.pos = p.pos + 1
+        mutate (cur(p).kind != "Identifier") {
+            return fail("expected an organism name, found ", cur(p).text)
+        }
+        cell Tok nameTok = cur(p)
+        p.pos = p.pos + 1
+        mutate (cur(p).kind != "LBrace") {
+            return fail("expected {, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+
+        cell colony fns = []
+        cell colony mems = []
+        cell colony traits = []
+        cell rna mainJ = "null"
+        cell colony top = []
+
+        replicate (cur(p).kind != "RBrace") {
+            mutate (cur(p).kind == "EOF") { sever }
+            mutate (cur(p).kind == "Organ") {
+                fns.inject(parseFunction(p))
+            } adapt mutate (cur(p).kind == "Trait") {
+                traits.inject(parseTrait(p))
+            } adapt mutate (cur(p).kind == "Membrane") {
+                mems.inject(parseMembrane(p))
+            } adapt mutate (cur(p).kind == "Nucleus") {
+                mainJ = parseMain(p)
+            } adapt {
+                top.inject(parseStatement(p))
+            }
+        }
+        mutate (cur(p).kind != "RBrace") {
+            return fail("expected }, found ", cur(p).text)
+        }
+        p.pos = p.pos + 1
+
+        return "{" + Q("type") + ":" + Q("Program") + ","
+            + field("name", Q(nameTok.text)) + ","
+            + field("functions", joinArr(fns)) + ","
+            + field("membranes", joinArr(mems)) + ","
+            + field("traits", joinArr(traits)) + ","
+            + field("main", mainJ) + ","
+            + field("topLevel", joinArr(top)) + "}"
+    }
+
+    nucleus() {
+        cell rna path = absorb("source? ")
+        cell rna src = readFile(path)
+        cell colony toks = lex(src)
+        cell P p = P { toks = toks, pos = 0 }
+        cell rna tree = parseProgram(p)
+        secrete(tree)
+    }
+}

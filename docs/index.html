@@ -143,7 +143,7 @@
       <span class="on">v1.0.0</span>
       <span>C# / .NET 10</span>
       <span>117 tests</span>
-      <span class="on">self-hosting lexer</span>
+      <span class="on">self-hosting: lexer + parser</span>
       <span>MIT</span>
       <span>tree-walking interpreter</span>
     </div>
@@ -227,6 +227,7 @@
           <li><code>fossil</code> refuses reassign <i>and</i> mutation</li>
           <li>Negative indexing: <code>-1</code> is the last element</li>
           <li>Modules via <code>graft</code>, with cycle detection</li>
+          <li><b>Self-hosting:</b> the lexer and parser are written in BioLang, byte-identical to the C# reference</li>
           <li>Structs (<code>membrane</code>) with methods and field mutation</li>
           <li>Traits: one organ accepts any membrane that witnesses it</li>
           <li>Closures: organs are values, <code>spore</code> is a lambda</li>
@@ -262,17 +263,28 @@
       <b>byte-equality</b>, not by hand-written expectations.
     </p>
 <pre>PASS  fibonacci.bio          100 tokens identical
-PASS  lexer.bio             1943 tokens identical</pre>
+PASS  lexer.bio             1943 tokens identical
+
+PASS  fibonacci.bio         2994 bytes identical
+PASS  lexlib.bio           53224 bytes identical
+PASS  parser.bio          286200 bytes identical</pre>
     <p class="muted">
       The second line is the interesting one: the self-hosted lexer lexing its own
       266-line source, through the same escape handling, comments and token types.
       Three bugs came out of that comparison — including an escape that turned
-      <code></code> into the letter <code>r</code>, which silently made every
+      <code>
+</code> into the letter <code>r</code>, which silently made every
       identifier starting with <code>r</code> disappear.
     </p>
     <p class="muted">
-      Stage one of four. The parser, the evaluator and the bootstrap are not
-      written yet.
+      The parser parses <b>its own 1,100-line source</b> and produces a tree
+      identical to the C# one, all 286 KB of it. Byte-equality is the only test
+      that catches a column drifting by one or a precedence level collapsing -
+      and four of those happened while this was being written.
+    </p>
+    <p class="muted">
+      <b>Stage two of four.</b> The lexer and the parser are done. The evaluator
+      and the bootstrap are not.
     </p>
 
     <h2>Design notes</h2>

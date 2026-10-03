@@ -3,6 +3,7 @@
 //   biolang <file.bio>              run a program
 //   biolang --tokens <f>            dump the token stream (debugging a lexer change)
 //   biolang --ast <f>               parse and report the tree shape without running
+//   biolang --ast-json-raw <f>      parse ONE file, no graft resolution (self-host check)
 //   biolang --max-loop <n> <f>      raise the loop cap for long-running work
 //
 // Exit codes: 0 ok, 1 syntax error, 2 runtime error, 3 usage.
@@ -28,6 +29,8 @@ internal static class Runner
             {
                 case "--tokens":
                 case "--ast":
+                case "--ast-json":
+                case "--ast-json-raw":
                     mode = args[i][2..];
                     break;
                 case "--max-loop":
@@ -74,6 +77,25 @@ internal static class Runner
             }
         }
 
+        // --ast-json-raw parses ONE file and resolves nothing. That is what a
+        // parser does; merging a grafted organism is the Loader's job. Comparing
+        // against the Loader-resolved tree is comparing a parser against a
+        // loader, which is not the same test.
+        if (mode == "ast-json-raw")
+        {
+            try
+            {
+                var rawTokens = new Lexer(File.ReadAllText(path, Encoding.UTF8)).Tokenize();
+                Console.WriteLine(AstJson.Dump(new Parser(rawTokens).ParseProgram()));
+                return 0;
+            }
+            catch (BioSyntaxError e)
+            {
+                Console.Error.WriteLine("  SYNTAX ERROR: " + e.Message);
+                return 1;
+            }
+        }
+
         Program program;
         try
         {
@@ -96,6 +118,13 @@ internal static class Runner
             Console.WriteLine($"  organs   : {string.Join(", ", program.Functions.Select(f => f.Name))}");
             Console.WriteLine($"  nucleus  : {(program.Main is null ? "absent" : "present")}");
             Console.WriteLine($"  top-level: {program.TopLevel.Count} statement(s)");
+            return 0;
+        }
+
+        // The full tree, for byte-comparison against the self-hosted parser.
+        if (mode == "ast-json")
+        {
+            Console.WriteLine(AstJson.Dump(program));
             return 0;
         }
 

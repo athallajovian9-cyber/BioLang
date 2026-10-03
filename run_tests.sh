@@ -581,13 +581,17 @@ echo "  ---- self-hosting: the BioLang lexer, written in BioLang ----"
 # Separate script, separate result: this asserts byte-equality against the C#
 # reference rather than a hand-written expectation, so it does not fit the
 # run/err helpers above.
-if [ -f selfhost/check_lexer.sh ]; then
-  if bash selfhost/check_lexer.sh 2>&1 | tail -6 | sed 's/^/  /'; then
-    :
+for chk in selfhost/check_lexer.sh selfhost/check_parser.sh; do
+  if [ -f "$chk" ]; then
+    if ! bash "$chk" 2>&1 | tail -6 | sed 's/^/  /'; then
+      fail=$((fail+1))
+      n=$((n+1))
+      echo "  FAIL  $chk"
+    fi
+  else
+    echo "  ($chk not present)"
   fi
-else
-  echo "  (selfhost/check_lexer.sh not present)"
-fi
+done
 
 echo ""
 echo "  ============================================"
