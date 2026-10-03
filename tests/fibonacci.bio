@@ -1,0 +1,24 @@
+organism FibonacciSystem {
+
+    organ computeGen(dna generations) -> colony {
+        cell colony sequence = [0, 1]
+        replicate (sequence.length < generations) {
+            dna nextGen = sequence[-1] + sequence[-2]
+            sequence.inject(nextGen)
+        }
+        return sequence
+    }
+
+    nucleus() {
+        fossil dna target = 10
+        fossil enzyme isReady = active
+
+        mutate (isReady) {
+            cell colony result = computeGen(target)
+            secrete("Generation Complete:")
+            secrete(result)
+        } adapt {
+            secrete("System is dormant.")
+        }
+    }
+}

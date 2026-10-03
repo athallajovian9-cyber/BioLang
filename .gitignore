@@ -1,0 +1,11 @@
+# build output
+bin/
+obj/
+_tmp_tests/
+
+# published artefacts - the zip ships as a release asset, not in the tree
+_release/
+
+# scratch
+*.user
+*.pdb
