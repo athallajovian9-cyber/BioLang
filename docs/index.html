@@ -224,11 +224,11 @@
         <h3>Not there yet</h3>
         <ul class="no">
           <li>It is an interpreter, not a compiler — no bytecode, no JIT, no optimiser</li>
-          <li><code>absorb</code> is a keyword with no implementation behind it</li>
-          <li>No for-loop, no else-if chain, no <code>break</code></li>
-          <li>One file per organism; no imports</li>
-          <li>The standard library is two array methods</li>
-          <li>No closures, no structs, no generics</li>
+          <li>No structs. <code>membrane</code> is reserved but unimplemented</li>
+          <li>No closures or lambdas — organs are top-level only</li>
+          <li>No generics, no user-defined operators, no namespaces</li>
+          <li>One <code>nucleus</code> per organism; grafted files may not declare their own</li>
+          <li>Loops are capped at 1,000,000 iterations — raise with <code>--max-loop N</code></li>
         </ul>
       </div>
     </div>
