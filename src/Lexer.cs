@@ -26,6 +26,7 @@ public enum TokKind
     Secrete, Absorb,
     // types + literals
     Rna, Dna, Enzyme, Colony, Active, Dormant,
+    Void,
     // values
     Identifier, Number, String, Bool,
     // punctuation
@@ -78,6 +79,7 @@ public sealed class Lexer
         ["absorb"]    = TokKind.Absorb,
         ["active"]    = TokKind.Active,
         ["dormant"]   = TokKind.Dormant,
+        ["void"]      = TokKind.Void,
         ["rna"]       = TokKind.Rna,
         ["dna"]       = TokKind.Dna,
         ["enzyme"]    = TokKind.Enzyme,
@@ -153,7 +155,29 @@ public sealed class Lexer
                     if (Cur == '\\')
                     {
                         Advance();
-                        sb.Append(Cur switch { 'n' => '\n', 't' => '\t', '"' => '"', '\\' => '\\', _ => Cur });
+                        // The carriage-return escape MUST be handled. Without it the
+                        // backslash fell through to the default, which produced the
+                        // string "r" for a CR escape - so a whitespace test written as
+                        // a CR literal matched the letter r, and every identifier
+                        // starting with r was skipped as whitespace. Rewriting an
+                        // unknown escape to its own letter is what made that
+                        // invisible, so unknown escapes are refused, not guessed at.
+                        char esc = Cur;
+                        char? mapped = esc switch
+                        {
+                            'n' => '\n',
+                            't' => '\t',
+                            'r' => (char)13,
+                            '0' => '\0',
+                            '"' => '"',
+                            '\\' => '\\',
+                            _ => null,
+                        };
+                        if (mapped is null)
+                            throw new BioSyntaxError(
+                                "unknown escape backslash-" + esc + " in a string literal",
+                                new Token(TokKind.String, sb.ToString(), line, col));
+                        sb.Append(mapped.Value);
                         Advance();
                         continue;
                     }

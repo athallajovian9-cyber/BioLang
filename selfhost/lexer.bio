@@ -1,0 +1,268 @@
+// BioLang's lexer, written in BioLang.
+//
+// This is stage one of self-hosting. The C# lexer in Lexer.cs stays the
+// reference: this program must produce byte-identical output for the same
+// input, and that equality is the test. "Looks about right" is not a result.
+//
+// Everything here is built from the primitives that had to be added first -
+// string indexing, .length, .slice, ord - because a lexer is a program that
+// walks characters, and BioLang previously could not.
+//
+//   biolang selfhost/lexer.bio <source-file>
+//
+organism BioLexer {
+
+    membrane Tok { rna kind  rna text  dna line  dna col }
+
+    // ------------------------------------------------------------ characters
+    organ code(rna c) -> dna { return ord(c) }
+
+    organ isSpace(rna c) -> enzyme {
+        mutate (c == " ")  { return active } adapt { }
+        mutate (c == "\n") { return active } adapt { }
+        mutate (c == "\t") { return active } adapt { }
+        mutate (c == "\r") { return active } adapt { }
+        return dormant
+    }
+
+    organ isDigit(rna c) -> enzyme {
+        cell dna k = code(c)
+        mutate (k >= 48) { mutate (k <= 57) { return active } adapt { } } adapt { }
+        return dormant
+    }
+
+    organ isUpper(rna c) -> enzyme {
+        cell dna k = code(c)
+        mutate (k >= 65) { mutate (k <= 90) { return active } adapt { } } adapt { }
+        return dormant
+    }
+
+    organ isLower(rna c) -> enzyme {
+        cell dna k = code(c)
+        mutate (k >= 97) { mutate (k <= 122) { return active } adapt { } } adapt { }
+        return dormant
+    }
+
+    organ isAlpha(rna c) -> enzyme {
+        mutate (isUpper(c)) { return active } adapt { }
+        mutate (isLower(c)) { return active } adapt { }
+        mutate (c == "_") { return active } adapt { }
+        return dormant
+    }
+
+    organ isAlnum(rna c) -> enzyme {
+        mutate (isAlpha(c)) { return active } adapt { }
+        mutate (isDigit(c)) { return active } adapt { }
+        return dormant
+    }
+
+    // -------------------------------------------------------------- keywords
+    // Linear scan rather than a map, because BioLang has no map type. Fine at
+    // fifty keywords; the honest cost is O(n) per identifier.
+    organ keywordKind(rna w) -> rna {
+        cell colony names = [
+            "organism", "nucleus", "organ", "cell", "fossil",
+            "mutate", "adapt", "replicate", "return",
+            "traverse", "sever", "skip",
+            "membrane", "graft", "spore", "trait", "witnesses",
+            "secrete", "absorb",
+            "rna", "dna", "enzyme", "colony", "active", "dormant", "void"
+        ]
+        cell colony kinds = [
+            "Organism", "Nucleus", "Organ", "Cell", "Fossil",
+            "Mutate", "Adapt", "Replicate", "Return",
+            "Traverse", "Sever", "Skip",
+            "Membrane", "Graft", "Spore", "Trait", "Witnesses",
+            "Secrete", "Absorb",
+            "Rna", "Dna", "Enzyme", "Colony", "Active", "Dormant", "Void"
+        ]
+        traverse (cell dna j = 0; j < names.length; j = j + 1) {
+            mutate (names[j] == w) { return kinds[j] } adapt { }
+        }
+        return "Identifier"
+    }
+
+    // Two-character operators must be tested before their first character, or
+    // "<=" lexes as "<" followed by "=".
+    organ pairKind(rna a, rna b) -> rna {
+        mutate (a == "-") { mutate (b == ">") { return "Arrow" } adapt { } } adapt { }
+        mutate (a == "=") { mutate (b == "=") { return "EqEq" } adapt { } } adapt { }
+        mutate (a == "!") { mutate (b == "=") { return "NotEq" } adapt { } } adapt { }
+        mutate (a == "<") { mutate (b == "=") { return "Le" } adapt { } } adapt { }
+        mutate (a == ">") { mutate (b == "=") { return "Ge" } adapt { } } adapt { }
+        return "None"
+    }
+
+    organ singleKind(rna c) -> rna {
+        mutate (c == "{") { return "LBrace" } adapt { }
+        mutate (c == "}") { return "RBrace" } adapt { }
+        mutate (c == "(") { return "LParen" } adapt { }
+        mutate (c == ")") { return "RParen" } adapt { }
+        mutate (c == "[") { return "LBracket" } adapt { }
+        mutate (c == "]") { return "RBracket" } adapt { }
+        mutate (c == ",") { return "Comma" } adapt { }
+        mutate (c == ".") { return "Dot" } adapt { }
+        mutate (c == ";") { return "Semicolon" } adapt { }
+        mutate (c == "=") { return "Assign" } adapt { }
+        mutate (c == "+") { return "Plus" } adapt { }
+        mutate (c == "-") { return "Minus" } adapt { }
+        mutate (c == "*") { return "Star" } adapt { }
+        mutate (c == "/") { return "Slash" } adapt { }
+        mutate (c == "<") { return "Lt" } adapt { }
+        mutate (c == ">") { return "Gt" } adapt { }
+        return "None"
+    }
+
+    organ push(colony toks, rna kind, rna text, dna line, dna col) -> void {
+        toks.inject(Tok { kind = kind, text = text, line = line, col = col })
+    }
+
+    // ------------------------------------------------------------------- lex
+    organ lex(rna src) -> colony {
+        cell colony toks = []
+        cell dna i = 0
+        cell dna line = 1
+        cell dna col = 1
+        cell dna n = src.length
+
+        replicate (i < n) {
+            cell rna c = src[i]
+
+            // ---- skip trivia: whitespace and both comment forms
+            cell enzyme skipping = active
+            replicate (skipping) {
+                mutate (i >= n) { skipping = dormant } adapt {
+                    cell rna t = src[i]
+                    mutate (isSpace(t)) {
+                        mutate (t == "\n") { line = line + 1 col = 1 } adapt { col = col + 1 }
+                        i = i + 1
+                    } adapt mutate (t == "/") {
+                        mutate (i + 1 < n) {
+                            cell rna t2 = src[i + 1]
+                            mutate (t2 == "/") {
+                                replicate (i < n) {
+                                    mutate (src[i] == "\n") { sever } adapt { i = i + 1 }
+                                }
+                            } adapt mutate (t2 == "*") {
+                                i = i + 2
+                                replicate (i + 1 < n) {
+                                    mutate (src[i] == "*") {
+                                        mutate (src[i + 1] == "/") { i = i + 2 sever } adapt { i = i + 1 }
+                                    } adapt { i = i + 1 }
+                                }
+                            } adapt { skipping = dormant }
+                        } adapt { skipping = dormant }
+                    } adapt { skipping = dormant }
+                }
+            }
+
+            mutate (i < n) {
+                cell dna sline = line
+                cell dna scol = col
+                cell rna ch = src[i]
+
+                // ---- two-character operators first
+                mutate (i + 1 < n) {
+                    cell rna pair = pairKind(ch, src[i + 1])
+                    mutate (pair != "None") {
+                        push(toks, pair, ch + src[i + 1], sline, scol)
+                        i = i + 2
+                        col = col + 2
+                    } adapt { }
+                } adapt { }
+
+                // ---- string literal
+                mutate (toks.length > 0) { } adapt { }
+                cell dna before = toks.length
+
+                mutate (i < n) {
+                    cell rna c2 = src[i]
+                    mutate (c2 == "\"") {
+                        cell dna j = i + 1
+                        cell rna body = ""
+                        cell enzyme closed = dormant
+                        replicate (j < n) {
+                            mutate (src[j] == "\"") { closed = active sever } adapt {
+                                mutate (src[j] == "\\") {
+                                    cell rna e = src[j + 1]
+                                    mutate (e == "n") { body = body + "\n" }
+                                        adapt mutate (e == "t") { body = body + "\t" }
+                                        adapt mutate (e == "r") { body = body + chr(13) }
+                                        adapt mutate (e == "0") { body = body + chr(0) }
+                                        adapt mutate (e == "\"") { body = body + "\"" }
+                                        adapt mutate (e == "\\") { body = body + "\\" }
+                                        adapt { body = body + e }
+                                    j = j + 2
+                                    col = col + 2
+                                } adapt {
+                                    body = body + src[j]
+                                    j = j + 1
+                                    col = col + 1
+                                }
+                            }
+                        }
+                        mutate (closed) {
+                            push(toks, "String", body, sline, scol)
+                            col = col + 2
+                            i = j + 1
+                        } adapt { }
+                    } adapt { }
+                } adapt { }
+
+                // ---- number
+                mutate (toks.length > before) { } adapt {
+                    mutate (i < n) {
+                        mutate (isDigit(src[i])) {
+                            cell rna num = ""
+                            replicate (i < n) {
+                                mutate (isDigit(src[i])) { num = num + src[i] i = i + 1 col = col + 1 }
+                                    adapt mutate (src[i] == ".") { num = num + "." i = i + 1 col = col + 1 }
+                                    adapt { sever }
+                            }
+                            push(toks, "Number", num, sline, scol)
+                        } adapt { }
+                    } adapt { }
+                }
+
+                // ---- identifier or keyword
+                mutate (toks.length > before) { } adapt {
+                    mutate (i < n) {
+                        mutate (isAlpha(src[i])) {
+                            cell rna word = ""
+                            replicate (i < n) {
+                                mutate (isAlnum(src[i])) { word = word + src[i] i = i + 1 col = col + 1 }
+                                    adapt { sever }
+                            }
+                            push(toks, keywordKind(word), word, sline, scol)
+                        } adapt { }
+                    } adapt { }
+                }
+
+                // ---- single-character token
+                mutate (toks.length > before) { } adapt {
+                    mutate (i < n) {
+                        cell rna s1 = singleKind(src[i])
+                        mutate (s1 != "None") {
+                            push(toks, s1, src[i], sline, scol)
+                            i = i + 1
+                            col = col + 1
+                        } adapt { }
+                    } adapt { }
+                }
+            } adapt { sever }
+        }
+
+        push(toks, "EOF", "<eof>", line, col)
+        return toks
+    }
+
+    nucleus() {
+        cell rna path = absorb("source? ")
+        cell rna src = readFile(path)
+        cell colony toks = lex(src)
+        traverse (cell dna k = 0; k < toks.length; k = k + 1) {
+            cell Tok t = toks[k]
+            secrete("  " + t.kind + "(" + t.text + ") at " + rna(t.line) + ":" + rna(t.col))
+        }
+    }
+}

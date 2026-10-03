@@ -577,6 +577,19 @@ err "a bad keyword" 'organism T { nucleus() { loop (1) { } } }' "SYNTAX ERROR"
 err "a stray character" 'organism T { nucleus() { secrete(1) @ } }' "unexpected character"
 
 echo ""
+echo "  ---- self-hosting: the BioLang lexer, written in BioLang ----"
+# Separate script, separate result: this asserts byte-equality against the C#
+# reference rather than a hand-written expectation, so it does not fit the
+# run/err helpers above.
+if [ -f selfhost/check_lexer.sh ]; then
+  if bash selfhost/check_lexer.sh 2>&1 | tail -6 | sed 's/^/  /'; then
+    :
+  fi
+else
+  echo "  (selfhost/check_lexer.sh not present)"
+fi
+
+echo ""
 echo "  ============================================"
 printf '  checks=%d  passes=%d  fails=%d\n' "$n" "$pass" "$fail"
 echo "  ============================================"

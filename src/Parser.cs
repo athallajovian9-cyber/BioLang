@@ -328,6 +328,7 @@ public sealed class Parser
             case TokKind.Colony:  t = TypeRef.Colony; break;
             // `organ` as a type: a parameter or field that takes a function.
             case TokKind.Organ:   t = new TypeRef(BioType.Organ); break;
+            case TokKind.Void:    t = new TypeRef(BioType.Void); break;
             case TokKind.Identifier: t = TypeRef.Membrane(Cur.Text); break;
             default:
                 throw new BioSyntaxError(
@@ -465,7 +466,7 @@ public sealed class Parser
     // or an identifier naming a membrane.
     private bool TypeStartsHere() =>
         Cur.Kind is TokKind.Rna or TokKind.Dna or TokKind.Enzyme or TokKind.Colony
-                      or TokKind.Organ
+                      or TokKind.Organ or TokKind.Void
         || Cur.Kind == TokKind.Identifier;
 
     private Stmt ParseVarDecl()

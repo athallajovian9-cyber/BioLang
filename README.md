@@ -167,6 +167,48 @@ cd BioLang && bash run_tests.sh
 A tree-walking interpreter. Lexer, recursive-descent parser, AST, evaluator.
 Written in C#.
 
+## Self-hosting
+
+The lexer is also written **in BioLang** — `selfhost/lexer.bio`. It reads a `.bio`
+source file and emits the same token stream the C# lexer does.
+
+```
+bash selfhost/check_lexer.sh
+
+PASS  fibonacci.bio          100 tokens identical
+PASS  lexer.bio             1943 tokens identical
+```
+
+It is checked by **byte-equality against the C# reference**, not against
+hand-written expectations. That distinction matters: byte-equality is the only
+test that catches a dropped character, a misread escape, or a column drifting by
+one — and all three happened while this was being written. `lexer.bio` lexing its
+own 266-line source is the interesting case, because it exercises strings with
+escapes, both comment forms and every token type through the self-hosted path.
+
+Three bugs came out of that comparison, none findable by reading:
+
+1. `\r` in a string literal produced the letter `r`, because the C# escape table
+   handled `\n`, `\t`, `\"` and `\\` and **silently dropped the backslash** on
+   anything else. A whitespace check written as a CR literal therefore matched the
+   letter `r`, and every identifier starting with `r` was skipped as whitespace.
+   Unknown escapes are now an error rather than being guessed at.
+2. The same bug again, independently, in the self-hosted lexer's escape table.
+3. `void` was missing from the self-hosted keyword list.
+
+Status: **stage one of four.**
+
+```
+1  lexer in BioLang       done, byte-identical
+2  parser in BioLang      not started
+3  evaluator in BioLang   not started
+4  bootstrap              not started
+```
+
+Stage 4 is the one that means "self-hosted" in the Rust sense: the `.bio`
+interpreter running `.bio` programs under the C# one. It still needs a C# host to
+start, which is the same stage0 problem every self-hosted language has.
+
 ## What it is not
 
 Stated plainly, because overselling an interpreter is the fastest way to lose a

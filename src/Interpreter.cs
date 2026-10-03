@@ -494,9 +494,22 @@ public sealed class Interpreter
                                     $"membrane '{s.TypeName}' has no field '{m.Name}'", m.Tok);
                             }
 
-                            if (t.Type != BioType.Colony)
-                                throw new BioRuntimeError(
-                                    $"'.{m.Name}' is not defined on {t.TypeLabel}", m.Tok);
+                            if (t.Type == BioType.Rna)
+                                            {
+                                                string str = (string)t.Raw;
+                                                return m.Name switch
+                                                {
+                                                    "length" => new Value(BioType.Dna, (double)str.Length),
+                                                    _ => throw new BioRuntimeError(
+                                                        $"rna has no member '{m.Name}'. It has: length, and the methods " +
+                                                        "slice, indexOf, contains, startsWith, endsWith, upper, lower, trim, split, chars",
+                                                        m.Tok),
+                                                };
+                                            }
+
+                                            if (t.Type != BioType.Colony)
+                                                throw new BioRuntimeError(
+                                                    $"'.{m.Name}' is not defined on {t.TypeLabel}", m.Tok);
                             if (m.Name == "length")
                                 return new Value(BioType.Dna, (double)((List<Value>)t.Raw).Count);
                             throw new BioRuntimeError($"colony has no member '{m.Name}'", m.Tok);
@@ -505,22 +518,39 @@ public sealed class Interpreter
             case MethodCall mc: return CallMethod(mc);
 
             case Index ix:
-            {
-                var t = Eval(ix.Target);
-                var k = Eval(ix.Key);
-                if (t.Type != BioType.Colony)
-                    throw new BioRuntimeError("indexing is only defined on colony", ix.Tok);
-                if (k.Type != BioType.Dna)
-                    throw new BioRuntimeError("an index must be dna", ix.Tok);
-                var list = (List<Value>)t.Raw;
-                int idx = (int)(double)k.Raw;
-                // negative indexes count from the end: -1 is the last element
-                if (idx < 0) idx += list.Count;
-                if (idx < 0 || idx >= list.Count)
-                    throw new BioRuntimeError(
-                        $"index {idx} is outside the colony (size {list.Count})", ix.Tok);
-                return list[idx];
-            }
+                        {
+                            var t = Eval(ix.Target);
+                            var k = Eval(ix.Key);
+
+                            // s[i] on a string, returning a one-character rna. The lexer is
+                            // built on this, so it has to exist before anything can self-host.
+                            if (t.Type == BioType.Rna)
+                            {
+                                if (k.Type != BioType.Dna)
+                                    throw new BioRuntimeError("a string index must be dna", ix.Tok);
+                                string str = (string)t.Raw;
+                                int si = (int)(double)k.Raw;
+                                if (si < 0) si += str.Length;
+                                if (si < 0 || si >= str.Length)
+                                    throw new BioRuntimeError(
+                                        $"index {si} is outside the string (length {str.Length})", ix.Tok);
+                                return new Value(BioType.Rna, str[si].ToString());
+                            }
+
+                            if (t.Type != BioType.Colony)
+                                throw new BioRuntimeError(
+                                    $"indexing is not defined on {t.TypeLabel}", ix.Tok);
+                            if (k.Type != BioType.Dna)
+                                throw new BioRuntimeError("an index must be dna", ix.Tok);
+                            var list = (List<Value>)t.Raw;
+                            int idx = (int)(double)k.Raw;
+                            // negative indexes count from the end: -1 is the last element
+                            if (idx < 0) idx += list.Count;
+                            if (idx < 0 || idx >= list.Count)
+                                throw new BioRuntimeError(
+                                    $"index {idx} is outside the colony (size {list.Count})", ix.Tok);
+                            return list[idx];
+                        }
 
             default:
                 throw new BioRuntimeError("unhandled expression " + e.GetType().Name);
@@ -569,7 +599,11 @@ public sealed class Interpreter
             // user organs so a program cannot accidentally shadow them into
             // something with different arity.
             if (c.Name == "absorb") return BuiltinAbsorb(c);
-            if (c.Name == "rna" || c.Name == "dna") return BuiltinConvert(c);
+                    if (c.Name == "rna" || c.Name == "dna") return BuiltinConvert(c);
+                    // Needed before anything can read its own source: the self-hosting path
+                    // starts with a lexer, and a lexer starts with a file and its characters.
+                    if (c.Name is "ord" or "chr" or "readFile" or "writeFile" or "fileExists" or "appendFile")
+                        return BuiltinFile(c);
 
             // A variable holding an organ shadows a declaration of the same name.
                     // Without this, higher-order functions are unusable - passing a function
@@ -623,13 +657,22 @@ public sealed class Interpreter
                 Define(cl.Params[i].Name, new Cell(argv[i], true, cl.Params[i].Tok), cl.Params[i].Tok);
 
             Value result;
-            try
-            {
-                ExecBlock(cl.Body);
-                // falling off the end of a non-void function is a bug in the program
-                throw new BioRuntimeError(
-                    $"'{cl.Label}' finished without returning a {cl.ReturnType}", tok);
-            }
+                        try
+                        {
+                            ExecBlock(cl.Body);
+                            // A `-> void` organ is a procedure: falling off the end is the
+                            // normal exit. Anything else promising a value and not delivering
+                            // one is a bug in the program, so it still fails.
+                            if (cl.ReturnType.Kind == BioType.Void)
+                            {
+                                result = Value.Void();
+                            }
+                            else
+                            {
+                                throw new BioRuntimeError(
+                                    $"'{cl.Label}' finished without returning a {cl.ReturnType}", tok);
+                            }
+                        }
             catch (ReturnSignal r)
             {
                 result = r.Value;
@@ -720,8 +763,93 @@ public sealed class Interpreter
                                                 return result;
                             }
 
-                            if (target.Type != BioType.Colony)
-                                throw new BioRuntimeError($".{mc.Name}() is not defined on {target.TypeLabel}", mc.Tok);
+                            // Strings carry their own methods. Kept separate from colony's because the
+                            // arities and the error text differ, and merging them produced messages that
+                            // mentioned the wrong type.
+                                        if (target.Type == BioType.Rna)
+                                        {
+                                            string str = (string)target.Raw;
+                                            string RnaArg(int i, string what)
+                                            {
+                                                var v = Eval(mc.Args[i]);
+                                                if (v.Type != BioType.Rna)
+                                                    throw new BioRuntimeError($"{what} must be rna, got {v.TypeLabel}", mc.Tok);
+                                                return (string)v.Raw;
+                                            }
+                                            int DnaArg(int i, string what)
+                                            {
+                                                var v = Eval(mc.Args[i]);
+                                                if (v.Type != BioType.Dna)
+                                                    throw new BioRuntimeError($"{what} must be dna, got {v.TypeLabel}", mc.Tok);
+                                                return (int)(double)v.Raw;
+                                            }
+
+                                            switch (mc.Name)
+                                            {
+                                                case "slice":
+                                                {
+                                                    Require(mc, 1, 2);
+                                                    int a = DnaArg(0, "slice start");
+                                                    if (a < 0) a += str.Length;
+                                                    int b = mc.Args.Count == 2 ? DnaArg(1, "slice end") : str.Length;
+                                                    if (b < 0) b += str.Length;
+                                                    if (b < a) throw new BioRuntimeError(
+                                                        $"slice({a}, {b}) ends before it starts", mc.Tok);
+                                                    a = Math.Clamp(a, 0, str.Length);
+                                                    b = Math.Clamp(b, 0, str.Length);
+                                                    return new Value(BioType.Rna, str.Substring(a, b - a));
+                                                }
+                                                case "indexOf":
+                                                {
+                                                    Require(mc, 1);
+                                                    return new Value(BioType.Dna, (double)str.IndexOf(RnaArg(0, "indexOf"), StringComparison.Ordinal));
+                                                }
+                                                case "contains":
+                                                {
+                                                    Require(mc, 1);
+                                                    return new Value(BioType.Enzyme, str.Contains(RnaArg(0, "contains"), StringComparison.Ordinal));
+                                                }
+                                                case "startsWith":
+                                                {
+                                                    Require(mc, 1);
+                                                    return new Value(BioType.Enzyme, str.StartsWith(RnaArg(0, "startsWith"), StringComparison.Ordinal));
+                                                }
+                                                case "endsWith":
+                                                {
+                                                    Require(mc, 1);
+                                                    return new Value(BioType.Enzyme, str.EndsWith(RnaArg(0, "endsWith"), StringComparison.Ordinal));
+                                                }
+                                                case "upper":
+                                                    Require(mc, 0);
+                                                    return new Value(BioType.Rna, str.ToUpperInvariant());
+                                                case "lower":
+                                                    Require(mc, 0);
+                                                    return new Value(BioType.Rna, str.ToLowerInvariant());
+                                                case "trim":
+                                                    Require(mc, 0);
+                                                    return new Value(BioType.Rna, str.Trim());
+                                                case "chars":
+                                                {
+                                                    Require(mc, 0);
+                                                    var chars = str.Select(c => new Value(BioType.Rna, c.ToString())).ToList();
+                                                    return new Value(BioType.Colony, chars);
+                                                }
+                                                case "split":
+                                                {
+                                                    Require(mc, 1);
+                                                    var parts = str.Split(RnaArg(0, "split separator"))
+                                                                   .Select(x => new Value(BioType.Rna, x)).ToList();
+                                                    return new Value(BioType.Colony, parts);
+                                                }
+                                                default:
+                                                    throw new BioRuntimeError(
+                                                        $"rna has no method '{mc.Name}'. Available: slice, indexOf, contains, " +
+                                                        "startsWith, endsWith, upper, lower, trim, chars, split", mc.Tok);
+                                            }
+                                        }
+
+                                        if (target.Type != BioType.Colony)
+                                            throw new BioRuntimeError($".{mc.Name}() is not defined on {target.TypeLabel}", mc.Tok);
 
             var list = (List<Value>)target.Raw;
 
@@ -911,7 +1039,97 @@ public sealed class Interpreter
             return new Value(BioType.Rna, line);
         }
 
-        // rna(x) and dna(x) convert between text and number explicitly.
+        // ord / chr / file reading. These are the primitives a self-hosted lexer needs:
+// it has to open its own source and walk it one character at a time.
+    private Value BuiltinFile(Call c)
+    {
+        switch (c.Name)
+        {
+            case "ord":
+            {
+                if (c.Args.Count != 1)
+                    throw new BioRuntimeError("ord() takes exactly one argument", c.Tok);
+                var v = Eval(c.Args[0]);
+                if (v.Type != BioType.Rna)
+                    throw new BioRuntimeError($"ord() needs rna, got {v.TypeLabel}", c.Tok);
+                string s = (string)v.Raw;
+                if (s.Length == 0)
+                    throw new BioRuntimeError("ord() of an empty string", c.Tok);
+                return new Value(BioType.Dna, (double)s[0]);
+            }
+            case "chr":
+            {
+                if (c.Args.Count != 1)
+                    throw new BioRuntimeError("chr() takes exactly one argument", c.Tok);
+                var v = Eval(c.Args[0]);
+                if (v.Type != BioType.Dna)
+                    throw new BioRuntimeError($"chr() needs dna, got {v.TypeLabel}", c.Tok);
+                int code = (int)(double)v.Raw;
+                if (code < 0 || code > 0x10FFFF)
+                    throw new BioRuntimeError($"chr({code}) is not a character code", c.Tok);
+                return new Value(BioType.Rna, char.ConvertFromUtf32(code));
+            }
+            case "readFile":
+            {
+                if (c.Args.Count != 1)
+                    throw new BioRuntimeError("readFile() takes exactly one argument", c.Tok);
+                var v = Eval(c.Args[0]);
+                if (v.Type != BioType.Rna)
+                    throw new BioRuntimeError($"readFile() needs a path, got {v.TypeLabel}", c.Tok);
+                string path = (string)v.Raw;
+                if (!File.Exists(path))
+                    throw new BioRuntimeError($"readFile: no such file '{path}'", c.Tok);
+                try
+                {
+                    // Normalise CRLF to LF. A lexer that has to reason about both
+                    // line endings is a lexer with a bug in it.
+                    string text = File.ReadAllText(path, System.Text.Encoding.UTF8)
+                                      .Replace("\r\n", "\n").Replace('\r', '\n');
+                    return new Value(BioType.Rna, text);
+                }
+                catch (Exception e)
+                {
+                    throw new BioRuntimeError($"readFile('{path}') failed: {e.Message}", c.Tok);
+                }
+            }
+            case "writeFile":
+            case "appendFile":
+            {
+                if (c.Args.Count != 2)
+                    throw new BioRuntimeError($"{c.Name}() takes a path and a string", c.Tok);
+                var pv = Eval(c.Args[0]);
+                var cv = Eval(c.Args[1]);
+                if (pv.Type != BioType.Rna)
+                    throw new BioRuntimeError($"{c.Name}() needs a path, got {pv.TypeLabel}", c.Tok);
+                string path = (string)pv.Raw;
+                // Display() so numbers and booleans can be written without a cast.
+                string text = Display(cv);
+                try
+                {
+                    if (c.Name == "writeFile") File.WriteAllText(path, text, System.Text.Encoding.UTF8);
+                    else File.AppendAllText(path, text, System.Text.Encoding.UTF8);
+                    return Value.Void();
+                }
+                catch (Exception e)
+                {
+                    throw new BioRuntimeError($"{c.Name}('{path}') failed: {e.Message}", c.Tok);
+                }
+            }
+            case "fileExists":
+            {
+                if (c.Args.Count != 1)
+                    throw new BioRuntimeError("fileExists() takes exactly one argument", c.Tok);
+                var v = Eval(c.Args[0]);
+                if (v.Type != BioType.Rna)
+                    throw new BioRuntimeError($"fileExists() needs a path, got {v.TypeLabel}", c.Tok);
+                return new Value(BioType.Enzyme, File.Exists((string)v.Raw));
+            }
+            default:
+                throw new BioRuntimeError($"unhandled builtin '{c.Name}'", c.Tok);
+        }
+    }
+
+    // rna(x) and dna(x) convert between text and number explicitly.
         private Value BuiltinConvert(Call c)
         {
             if (c.Args.Count != 1)
