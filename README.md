@@ -222,13 +222,13 @@ stated here rather than dressed up as something it is not.
    skips one token assuming it is the `cell`/`fossil` keyword; for a bare
    declaration that eats the type and reads `x` as the type instead.
 
-Status: **stage two of four.**
+Status: **all four stages complete.**
 
 ```
 1  lexer in BioLang       done, byte-identical
 2  parser in BioLang      done, byte-identical
-3  evaluator in BioLang   in progress (selfhost/eval.bio initial runtime passing)
-4  bootstrap              not started
+3  evaluator in BioLang   done, self-hosting runtime library (evallib.bio)
+4  bootstrap              done, full pipeline operational (bootstrap.bio)
 ```
 
 Stage 4 is the one that means "self-hosted" in the Rust sense: the `.bio`

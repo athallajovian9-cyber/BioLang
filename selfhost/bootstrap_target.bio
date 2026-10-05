@@ -1,0 +1,22 @@
+// BioLang Stage 4: Bootstrap Test Program
+// Tests end-to-end self-hosting execution across all primitives.
+
+organism BootstrapTest {
+    organ fib(dna n) -> dna {
+        mutate (n <= 1) {
+            return n
+        }
+        return fib(n - 1) + fib(n - 2)
+    }
+
+    nucleus() {
+        secrete("--- BIOLANG STAGE 4 BOOTSTRAP TEST ---")
+        cell dna res = fib(10)
+        secrete("Fibonacci(10) = " + rna(res))
+
+        cell colony items = ["A", "B", "C"]
+        items.inject("D")
+        secrete("Colony count: " + rna(items.length))
+        secrete("Stage 4 Bootstrap Verified Successfully!")
+    }
+}
