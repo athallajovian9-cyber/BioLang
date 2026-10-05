@@ -118,15 +118,130 @@ organism BioEvaluator {
         return dormant
     }
 
+    // ------------------------------------------------------------------ Operations
+    organ evalAdd(Val a, Val b) -> Val {
+        mutate (a.kind == 1) {
+            mutate (b.kind == 1) {
+                return makeDna(a.numVal + b.numVal)
+            }
+        }
+        mutate (a.kind == 2) {
+            return makeRna(valDisplay(a) + valDisplay(b))
+        }
+        mutate (b.kind == 2) {
+            return makeRna(valDisplay(a) + valDisplay(b))
+        }
+        mutate (a.kind == 4) {
+            mutate (b.kind == 4) {
+                cell colony combined = []
+                traverse (cell dna i = 0; i < a.listVal.length; i = i + 1) {
+                    combined.inject(a.listVal[i])
+                }
+                traverse (cell dna j = 0; j < b.listVal.length; j = j + 1) {
+                    combined.inject(b.listVal[j])
+                }
+                return makeColony(combined)
+            }
+        }
+        secrete("  RUNTIME ERROR: invalid operands for '+'")
+        cell dna zero = 0
+        dna err = zero / zero
+        return makeVoid()
+    }
+
+    organ evalSub(Val a, Val b) -> Val {
+        mutate (a.kind == 1) {
+            mutate (b.kind == 1) {
+                return makeDna(a.numVal - b.numVal)
+            }
+        }
+        secrete("  RUNTIME ERROR: '-' requires numeric operands")
+        cell dna zero = 0
+        dna err = zero / zero
+        return makeVoid()
+    }
+
+    organ evalMul(Val a, Val b) -> Val {
+        mutate (a.kind == 1) {
+            mutate (b.kind == 1) {
+                return makeDna(a.numVal * b.numVal)
+            }
+        }
+        secrete("  RUNTIME ERROR: '*' requires numeric operands")
+        cell dna zero = 0
+        dna err = zero / zero
+        return makeVoid()
+    }
+
+    organ evalDiv(Val a, Val b) -> Val {
+        mutate (a.kind == 1) {
+            mutate (b.kind == 1) {
+                mutate (b.numVal == 0) {
+                    secrete("  RUNTIME ERROR: division by zero")
+                    cell dna zero = 0
+                    dna err = zero / zero
+                }
+                return makeDna(a.numVal / b.numVal)
+            }
+        }
+        secrete("  RUNTIME ERROR: '/' requires numeric operands")
+        cell dna zero = 0
+        dna err = zero / zero
+        return makeVoid()
+    }
+
+    organ evalEqual(Val a, Val b) -> Val {
+        mutate (a.kind != b.kind) {
+            return makeEnzyme(dormant)
+        }
+        mutate (a.kind == 0) { return makeEnzyme(active) }
+        adapt mutate (a.kind == 1) { return makeEnzyme(a.numVal == b.numVal) }
+        adapt mutate (a.kind == 2) { return makeEnzyme(a.strVal == b.strVal) }
+        adapt mutate (a.kind == 3) { return makeEnzyme(a.boolVal == b.boolVal) }
+        adapt mutate (a.kind == 4) {
+            mutate (a.listVal.length != b.listVal.length) { return makeEnzyme(dormant) }
+            traverse (cell dna i = 0; i < a.listVal.length; i = i + 1) {
+                cell Val eq = evalEqual(a.listVal[i], b.listVal[i])
+                mutate (eq.boolVal == dormant) { return makeEnzyme(dormant) }
+            }
+            return makeEnzyme(active)
+        }
+        return makeEnzyme(dormant)
+    }
+
+    organ evalLess(Val a, Val b) -> Val {
+        mutate (a.kind == 1) {
+            mutate (b.kind == 1) {
+                return makeEnzyme(a.numVal < b.numVal)
+            }
+        }
+        mutate (a.kind == 2) {
+            mutate (b.kind == 2) {
+                return makeEnzyme(a.strVal < b.strVal)
+            }
+        }
+        secrete("  RUNTIME ERROR: '<' requires numbers or strings")
+        cell dna zero = 0
+        dna err = zero / zero
+        return makeVoid()
+    }
+
     nucleus() {
         secrete("BioLang Self-Hosting Evaluator (Stage 3) Initialized.")
         cell Scope s = newScope()
-        defineVar(s, "x", makeDna(42), active)
+        defineVar(s, "x", makeDna(40), active)
+        defineVar(s, "y", makeDna(2), dormant)
         defineVar(s, "name", makeRna("BioLang"), dormant)
 
         cell Val xVal = lookupScope(s, "x")
-        secrete("x = " + valDisplay(xVal))
-        cell Val nameVal = lookupScope(s, "name")
-        secrete("name = " + valDisplay(nameVal))
+        cell Val yVal = lookupScope(s, "y")
+        cell Val sumVal = evalAdd(xVal, yVal)
+        secrete("x + y = " + valDisplay(sumVal))
+
+        cell Val mulVal = evalMul(xVal, yVal)
+        secrete("x * y = " + valDisplay(mulVal))
+
+        cell Val eqVal = evalEqual(sumVal, makeDna(42))
+        secrete("sum == 42 : " + valDisplay(eqVal))
     }
 }
