@@ -227,7 +227,7 @@ Status: **stage two of four.**
 ```
 1  lexer in BioLang       done, byte-identical
 2  parser in BioLang      done, byte-identical
-3  evaluator in BioLang   not started
+3  evaluator in BioLang   in progress (selfhost/eval.bio initial runtime passing)
 4  bootstrap              not started
 ```
 
