@@ -31,6 +31,8 @@ internal static class Runner
                 case "--ast":
                 case "--ast-json":
                 case "--ast-json-raw":
+                case "--emit-c":
+                case "--compile":
                     mode = args[i][2..];
                     break;
                 case "--max-loop":
@@ -125,6 +127,13 @@ internal static class Runner
         if (mode == "ast-json")
         {
             Console.WriteLine(AstJson.Dump(program));
+            return 0;
+        }
+
+        // Native Machine Code C99/C++ Emitter Backend
+        if (mode == "emit-c")
+        {
+            Console.WriteLine(CodeGen.EmitC(program));
             return 0;
         }
 

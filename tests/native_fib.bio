@@ -1,0 +1,16 @@
+// BioLang Native Compilation Target: Fibonacci (Pure C-compatible grammar)
+organism NativeFibonacci {
+    organ fib(dna n) -> dna {
+        mutate (n <= 1) {
+            return n
+        }
+        return fib(n - 1) + fib(n - 2)
+    }
+
+    nucleus() {
+        fossil dna target = 10
+        cell dna result = fib(target)
+        secrete("Fibonacci of 10 computed in native x86 machine code:")
+        secrete(result)
+    }
+}
